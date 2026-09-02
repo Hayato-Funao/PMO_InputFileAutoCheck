@@ -1,0 +1,9 @@
+# SharePoint連携（sp_auth.py/sp_integration.py/unified_main.py）で使用する外部ライブラリ。
+# ntlm_proxy.py が requests の代わりを標準ライブラリのみで実装しているため、requests は不要。
+msal
+
+# ②(check_fs_matrix)の判定ロジック（matrix_check.py/gst_command_check.py/definition_file_check.py。
+# ①②③統合のためsys.path経由で既存フォルダから流用している）がExcel読み込みに使用する。
+# ①(check_mao)側の判定ロジックはopenpyxlを使わず自前でxlsx/xlsmをパースするため、①分のみを動かす
+# 場合（RUN_CHECK2=False）は本来不要だが、②を有効化する可能性を考慮し常時インストールしておく。
+openpyxl
