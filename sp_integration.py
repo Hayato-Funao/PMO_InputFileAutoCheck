@@ -28,7 +28,7 @@
 
 import os
 import re
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import ntlm_proxy
 from sp_auth import LIST_GUID, SITE_URL
@@ -212,6 +212,108 @@ def download_file(access_token, server_relative_url, local_path):
 	os.makedirs(os.path.dirname(local_path), exist_ok=True)
 	with open(local_path, "wb") as f:
 		f.write(resp.content)
+
+
+# ---- ブラウザからコピーしたURLでファイルを取得する（2026-09-02新規） --------------------
+# SharePointの共有リンクに付く `/:x:/r/` 形式の接頭辞（`:x:`=Excel・`:w:`=Word等、`/r/`=redirect）。
+# サーバー相対パスとしては存在しない飾りなので、パスから取り除く必要がある。
+_SHARING_LINK_PREFIX_RE = re.compile(r"^/:[a-zA-Z]:/[a-zA-Z]+/")
+
+# `%u5143`（=元）のようなレガシー（IE系）エスケープ。Doc.aspxリンクの`file=`パラメータで使われる
+# ことがあり、`unquote`では戻らないため個別にデコードする。
+_LEGACY_PERCENT_U_RE = re.compile(r"%u([0-9a-fA-F]{4})")
+
+_GUID_RE = re.compile(r"^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
+
+
+def is_sharepoint_file_url(location):
+	"""`location`がSharePointのURL（http/https）か。Falseならローカルパスとして扱ってよい。"""
+	return isinstance(location, str) and location.strip().lower().startswith(("http://", "https://"))
+
+
+def _decode_legacy_percent_u(text):
+	return _LEGACY_PERCENT_U_RE.sub(lambda m: chr(int(m.group(1), 16)), text)
+
+
+def parse_file_url(absolute_url):
+	"""
+	ブラウザのアドレスバー／「リンクのコピー」から得たSharePointのファイルURLを、REST APIで
+	取得できる形へ分解する。
+
+	対応する形式:
+	  * `.../:x:/r/sites/<site>/_layouts/15/Doc.aspx?sourcedoc=%7BGUID%7D&file=xxx.xlsx&...`
+	    （Excel Onlineで開くリンク。パスにファイルの場所が入っていないため、`sourcedoc`の
+	    GUID（ファイルのUniqueId）を使って`GetFileById`で取得する）
+	  * `.../:x:/r/sites/<site>/<ライブラリ>/.../xxx.xlsx?web=1`（共有リンク）
+	  * `.../sites/<site>/<ライブラリ>/.../xxx.xlsx`（通常のURL）
+
+	サイトURLはURL自身から求めるため、`SITE_URL`（案件リストのサイト）とは別サイトのファイルでも
+	取得できる。アクセストークンはテナント（ホスト）単位なのでそのまま使える。
+
+	戻り値:
+		(サイトURL, ファイル取得用のRESTセレクタ, URLから読み取れたファイル名（無ければ空文字）)
+	"""
+	parsed = urlparse(absolute_url)
+	origin = f"{parsed.scheme}://{parsed.netloc}"
+
+	path = _SHARING_LINK_PREFIX_RE.sub("/", unquote(parsed.path))
+	segments = [s for s in path.split("/") if s]
+
+	site_url = origin
+	for index, segment in enumerate(segments):
+		if segment.lower() in ("sites", "teams") and index + 1 < len(segments):
+			site_url = f"{origin}/{segment}/{segments[index + 1]}"
+			break
+
+	query = parse_qs(parsed.query)
+	source_doc = (query.get("sourcedoc") or [""])[0].strip().strip("{}")
+	file_name = os.path.basename(_decode_legacy_percent_u(unquote((query.get("file") or [""])[0])).strip())
+
+	if source_doc:
+		if not _GUID_RE.match(source_doc):
+			raise ValueError(f"sourcedocをGUIDとして解釈できない: {source_doc!r}")
+		return site_url, f"GetFileById(guid'{source_doc}')", file_name
+
+	if any(s.lower() == "_layouts" for s in segments):
+		raise ValueError(
+			"_layouts配下のリンクだが`sourcedoc`が無いためファイルを特定できない。"
+			f"ブラウザで対象ファイルを開き直してURLをコピーし直すこと: {absolute_url}"
+		)
+
+	if not segments:
+		raise ValueError(f"URLからファイルのパスを読み取れない: {absolute_url}")
+
+	server_relative = "/" + "/".join(segments)
+	return site_url, f"GetFileByServerRelativeUrl('{server_relative}')", file_name or segments[-1]
+
+
+def download_file_from_url(access_token, absolute_url, local_dir, file_name=None):
+	"""
+	`absolute_url`（ブラウザからコピーしたSharePointのURL）が指すファイルを`local_dir`へ
+	ダウンロードし、そのローカルパスを返す。`parse_file_url`が解釈できる全形式に対応する。
+
+	保存名はURLから読み取ったファイル名（`file_name`で明示指定も可）。拡張子が取れない場合は
+	`.xlsx`を付ける（拡張子が無いとopenpyxlが「サポート外の形式」で落ちるため）。
+
+	戻り値:
+		ダウンロードしたファイルのローカルパス
+	"""
+	site_url, selector, parsed_name = parse_file_url(absolute_url)
+
+	name = os.path.basename(file_name or parsed_name or "sharepoint_reference")
+	if not os.path.splitext(name)[1]:
+		name += ".xlsx"
+
+	headers = {"Authorization": f"Bearer {access_token}"}
+	url = f"{site_url}/_api/web/{selector}/$value"
+	resp = ntlm_proxy.http_request("GET", url, headers=headers)
+	resp.raise_for_status()
+
+	os.makedirs(local_dir, exist_ok=True)
+	local_path = os.path.join(local_dir, name)
+	with open(local_path, "wb") as f:
+		f.write(resp.content)
+	return local_path
 
 
 def get_entity_type_full_name(access_token):

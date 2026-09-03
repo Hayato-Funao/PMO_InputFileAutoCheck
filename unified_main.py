@@ -15,11 +15,19 @@
 どこへコピーしても単独で動作する（①②の元フォルダへの参照は不要）。ただし①②の判定ロジックの
 改修時は、元フォルダとこのコピーの両方に反映する必要がある点に注意（重複管理）。
 
+【②の判定条件をマクロ準拠版へ統一】2026-09-02改修。同梱コピーの`check_fs_matrix\\matrix_check.py`
+／`gst_command_check.py`は、簡易判定（○×記号リストとの単純な突き合わせ）のままで本フォルダ直下の
+マクロ準拠版`matrix_check_ref.py`／`gst_command_check_ref.py`（実マクロ modChkExec.ReadFromFS ／
+ReadFromGST をリバースエンジニアリングした版）と判定条件が食い違っていたため、内容を同一の実装へ
+差し替えた。これによりunified_main.pyの②チェーンは*_ref.pyと同じ条件でファイルを検査する
+（マクロが停止するNGだけでなく、無警告で誤った結果を出すWARNもNG扱い）。*_ref.pyを改修した際は
+同梱コピー側にも必ず反映すること。
+
 SharePoint連携コード（`ntlm_proxy.py`/`sp_auth.py`/`sp_integration.py`）と実行用コードは、
 元から本フォルダに集約済み。
 
 【②の未完成を考慮したRUN_CHECK2フラグ】②の定義ファイルチェックが参照する2つのローカルパス
-（`definition_file_check.SERVER_REFERENCE_FILE_PATH`・本ファイルの`SHAREPOINT_REFERENCE_LOCAL_PATH`）
+（`definition_file_check.SERVER_REFERENCE_FILE_PATH`・本ファイルの`SHAREPOINT_REFERENCE_FILE_PATH_OR_URL`）
 は、②担当者の個人環境（RJ067219）のパスのままで本番サーバには存在せず、本番では②の定義ファイル
 チェックが必ずNGになる（例外は出ないが、判定はNG固定）。②担当者がこれらを本番用パスへ修正するまで、
 `RUN_CHECK2 = False`（既定値）にしておくことで、②の行を列に書き込まず①のみを稼働させる。②担当者の
@@ -30,6 +38,7 @@ SharePoint連携コード（`ntlm_proxy.py`/`sp_auth.py`/`sp_integration.py`）�
 """
 
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -43,6 +52,7 @@ from datetime import datetime
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 CHECK_MAO_DIR = os.path.join(_THIS_DIR, "check_mao")
 CHECK_FS_MATRIX_DIR = os.path.join(_THIS_DIR, "check_fs_matrix")
+CHECK_PROF_DIR = os.path.join(_THIS_DIR, "check_prof")
 if not os.path.isdir(CHECK_MAO_DIR):
 	raise RuntimeError(
 		f"①(check_mao)の判定ロジックコピーが見つからない: {CHECK_MAO_DIR}"
@@ -53,8 +63,14 @@ if not os.path.isdir(CHECK_FS_MATRIX_DIR):
 		f"②(check_fs_matrix)の判定ロジックコピーが見つからない: {CHECK_FS_MATRIX_DIR}"
 		"（ツール本体フォルダ内のcheck_fs_matrix\\が欠けている。コピーし直すこと）"
 	)
+if not os.path.isdir(CHECK_PROF_DIR):
+	raise RuntimeError(
+		f"③(check_prof)の判定ロジックコピーが見つからない: {CHECK_PROF_DIR}"
+		"（ツール本体フォルダ内のcheck_prof\が欠けている。コピーし直すこと）"
+	)
 sys.path.append(CHECK_MAO_DIR)
 sys.path.append(CHECK_FS_MATRIX_DIR)
+sys.path.append(CHECK_PROF_DIR)
 
 import result as check1_result  # noqa: E402  ①分。pure（SharePoint連携に依存しない）のため直接import
 from case_scan import scan_case_folder  # noqa: E402
@@ -67,30 +83,73 @@ import definition_file_check  # noqa: E402  ②分。pure（SharePoint連携に�
 import gst_command_check  # noqa: E402
 import matrix_check  # noqa: E402
 
+import prof_check  # noqa: E402  ③分。pure（SharePoint連携に依存しない）のため直接import
+
 import sp_auth  # noqa: E402  本フォルダ内のSP連携コード
 import sp_integration  # noqa: E402
 import unified_result  # noqa: E402
 
 # ---- 設定 ------------------------------------------------------------------------------
-# ②の定義ファイルチェックを実行対象に含めるかどうか。②担当者が下記2つのパスを本番用へ修正する
-# まではFalseのままにすること（モジュールdocstring参照）。
-RUN_CHECK2 = False
+# ②の定義ファイルチェックを実行対象に含めるかどうか（2026-09-02改修でTrueへ切り替え）。
+# Trueにすると②の行が`InputFileCheckResult`列へ加わり、②詳細ファイル
+# （`FSマトリクス_定義ファイルチェック結果_{Title列}.txt`）が案件の`01_INPUT`へアップロードされる。
+# 【注意】②の定義ファイルチェックは下記2つのローカルパスを参照する:
+#   - `definition_file_check.SERVER_REFERENCE_FILE_PATH`（XPX定義ファイル管理ファイル）
+#   - `SHAREPOINT_REFERENCE_FILE_PATH_OR_URL`（下記。SharePointのURL指定時は実行時にダウンロード）
+# どちらも実行環境に存在しない場合、②の[元表]／[fcl_list_o_FI]／[fcl_list_x_FI]は
+# 「ファイルを開けない」でNG固定になる（例外は出ず、②全体がNGになるだけ）。本番サーバで
+# 稼働させる際は、この2つが本番のパスを指しているかを必ず確認すること。
+RUN_CHECK2 = True
+
+# ③(check_prof)のHEX/A2Lチェックを実行対象に含めるかどうか（2026-09-02新規）。
+# 初回デプロイ時はFalse（既存の①②の動作を一切変えないため）。動作確認後にTrueへ切り替える。
+# 【動確時の確認事項】③がNGになった案件の内訳を必ず見ること。③はHEX/.epd/.a2lの
+# いずれかが未提出ならNGにする（fail-closed）ため、HEXを伴わない申請（CAN情報のみの
+# 変更等）が実在する場合は一律で赤になってしまう。その場合はスコープ判定の追加を検討する。
+# 【2026-09-03改修】①②③を合わせた動作確認のためTrueへ切り替え。
+RUN_CHECK3 = True
 
 # ②分の第2参照ファイル（SharePoint上にある特定の申請に紐付かない固定ファイル。②の
-# `input_check_main.SHAREPOINT_REFERENCE_FILE_PATH`と同じ役割）。②担当者の個人パスを暫定値として
-# 引き継いでいる。RUN_CHECK2=True化と合わせて本番用パスへ修正すること。
-# TODO: ②担当者による本番パスへの修正が必要（現状は本番サーバに存在しないダミー値）。
-SHAREPOINT_REFERENCE_LOCAL_PATH = (
-	r"C:\Users\RJ067219\OneDrive - Honda\デスクトップ\work\2026_タスク\08_タスク"
-	r"\Check_PythonCode\FI-FailSafeMatrix元表_SP.xlsx"
+# `input_check_main.SHAREPOINT_REFERENCE_FILE_PATH`と同じ役割）。
+#
+# 【2026-09-02改修】ブラウザからコピーしたSharePointのURLを直接指定できるようにした。以前は
+# ローカルパスしか受け付けず、URLを入れると`openpyxl`が
+# 「does not support .xlsx&action=default&mobileredirect=true file format」で失敗していた
+# （openpyxlはローカルファイルしか開けず、URLの末尾クエリを拡張子と誤認するため）。URLの場合は
+# 実行時に1回だけRESTでダウンロードし、その一時ファイルを②へ渡す（`_resolve_definition_reference`）。
+# 次の3形式に対応する:
+#   * Excel Onlineで開くリンク（`_layouts/15/Doc.aspx?sourcedoc={GUID}&file=...`）
+#   * 「リンクのコピー」で得られる共有リンク（`.../:x:/r/sites/<site>/...xlsx?web=1`）
+#   * 通常のURL（`.../sites/<site>/<ライブラリ>/...xlsx`）／ローカルの絶対パス
+# 案件リストのサイト(`sp_auth.SITE_URL`=jphgt105596)とは別サイトのファイルでも取得できる。
+#
+# 元表ファイルは3ヶ月ごとに更新されるため、このリンクも定期的に更新が必要。
+# （現在の値: FI-FailSafeMatrix元表(26.06.30).xlsx / sites/jphgt107305）
+SHAREPOINT_REFERENCE_FILE_PATH_OR_URL = (
+	r"https://globalhonda.sharepoint.com/:x:/r/sites/jphgt107305/_layouts/15/Doc.aspx?sourcedoc=%7B6FDCABAA-F3F1-4AE6-9F9A-AC20E2B0D1B4%7D&file=FI-FailSafeMatrix%25u5143%25u8868(26.06.30).xlsx&action=default&mobileredirect=true"
 )
-
 # ①専用の詳細結果（マスク別・NG明細。①`sp_main.DETAIL_FILE_NAME`と同名）
 DETAIL_FILE_NAME_1 = "MAO_CANマトリクス比較結果.txt"
 
 # ②専用の詳細結果（[FS Matrix]／[GSTCommand]／[元表]等の明細。②`input_check_main.DETAIL_FILE_NAME`
-# と同名）
+# と同名）の基本ファイル名。実際に出力・アップロードするファイル名は、どの申請の結果か一目で
+# 分かるようTitle列（案件ID）を末尾に付けた`FSマトリクス_定義ファイルチェック結果_{Title列}.txt`
+# （2026-09-02改修。`_check2_detail_file_name`が組み立てる）。中身の書式は②の元実装
+# （`input_check_main.write_report`）と同じ「実行日時 → === OK === → === NG ===」のまま。
 DETAIL_FILE_NAME_2 = "FSマトリクス_定義ファイルチェック結果.txt"
+
+# ②詳細ファイル名へTitle列の値を埋め込む際に落とす文字。Windowsのファイル名禁止文字
+# (\ / : * ? " < > |) に加え、SharePointのアップロードURL（`Files/add(url='...')`のODataリテラル。
+# `'`が入るとURLが壊れる）やリンクHTML・URLとして解釈される文字（# % & + { } ~）、制御文字も
+# まとめて置換対象にする。
+_FILE_NAME_NG_CHARS = re.compile(r"""[\\/:*?"<>|#%&{}~+'\x00-\x1f]""")
+
+# Title列が長い場合にファイル名が肥大しないよう、埋め込む部分の上限文字数。
+_FILE_NAME_PART_MAX_LEN = 60
+
+# ③専用の詳細結果（①②③の各判定と入力ファイル情報の明細）。書式は②と同じ
+# 「実行日時 → === OK === → === NG ===」。
+DETAIL_FILE_NAME_3 = "HEX_A2Lチェック結果.txt"
 
 # ①②③統合の判定サマリ（`InputFileCheckResult`列のマージ後値）を書き込む集約ファイル。①②と同名。
 AGGREGATE_FILE_NAME = "インプットファイルチェック結果.txt"
@@ -122,6 +181,65 @@ def _resolve_local_path(local_input_dir, fallback_dir, access_token, url):
 	return fallback_path
 
 
+def _resolve_definition_reference(access_token, work_directory):
+	"""
+	②の第2参照ファイル（SharePoint上の元表ファイル）のローカルパスを解決する。
+
+	`SHAREPOINT_REFERENCE_FILE_PATH_OR_URL`がSharePointのURLなら`work_directory`へ
+	ダウンロードしてそのパスを返す（`openpyxl`はローカルファイルしか開けないため、URLを
+	そのまま渡すことはできない）。ローカルパスならそのまま返す。
+
+	戻り値:
+		(ローカルパス, エラーメッセージ) — 取得できた場合は(パス, None)、
+		ダウンロードに失敗した場合は(None, 理由)。呼び出し側は理由を[元表]のNGメッセージに使う
+		（取得できなくても、XPX定義ファイル側だけで判定できる○×シートのチェックは続行する）。
+	"""
+	location = SHAREPOINT_REFERENCE_FILE_PATH_OR_URL
+	if not sp_integration.is_sharepoint_file_url(location):
+		return location, None
+
+	try:
+		local_path = sp_integration.download_file_from_url(access_token, location, work_directory)
+	except Exception as e:
+		return None, (
+			f"SharePointから元表ファイルを取得できない: {e}"
+			f"（SHAREPOINT_REFERENCE_FILE_PATH_OR_URL={location}）"
+		)
+
+	print(f"元表ファイルをSharePointから取得: {os.path.basename(local_path)}")
+	return local_path, None
+
+
+def _sanitize_file_name_part(value):
+	"""
+	Title列の値を、ファイル名の一部として安全な形へ整える。`_FILE_NAME_NG_CHARS`に該当する文字は
+	`_`へ置換し、空白（全角空白・改行を含む）は`_`へ潰し、前後の`.`／`_`／空白を除去して
+	`_FILE_NAME_PART_MAX_LEN`文字で切る。
+
+	戻り値:
+		整えた文字列。使える文字が1つも残らない場合（Title列が空・記号のみ等）は空文字。
+	"""
+	text = "" if value is None else str(value)
+	text = _FILE_NAME_NG_CHARS.sub("_", text)
+	text = re.sub(r"\s+", "_", text)
+	return text[:_FILE_NAME_PART_MAX_LEN].strip("._ 　")
+
+
+def _check2_detail_file_name(case_id):
+	"""
+	②専用の詳細ファイル名`FSマトリクス_定義ファイルチェック結果_{Title列}.txt`を組み立てる。
+
+	Title列が空、またはファイル名に使える文字が1つも残らない場合は接尾辞を付けず
+	`DETAIL_FILE_NAME_2`のままにする（詳細ファイルは申請ごとに別の案件フォルダ配下へ
+	アップロードするため、接尾辞が無くても他の申請の結果を上書きすることはない）。
+	"""
+	suffix = _sanitize_file_name_part(case_id)
+	if not suffix:
+		return DETAIL_FILE_NAME_2
+	stem, extension = os.path.splitext(DETAIL_FILE_NAME_2)
+	return f"{stem}_{suffix}{extension}"
+
+
 def _write_check2_report(ok_lines, ng_lines, output_path):
 	"""②専用の詳細ファイルをOK/NG2セクションで書き出す（②`input_check_main.write_report`と
 	同じ構成）。SharePointへアップロードしたファイルをブラウザで直接開いた際の文字化けを避けるため、
@@ -142,15 +260,21 @@ def _write_check2_report(ok_lines, ng_lines, output_path):
 def _run_check2(access_token, item, local_input_dir, fallback_dir, definition_parts, definition_result_message):
 	"""
 	②分（FSマトリクス↔定義ファイルチェック）を1アイテム分実行し、②専用の詳細ファイルを
-	`local_input_dir`直下へ書き出す。`definition_parts`／`definition_result_message`は
-	アイテム非依存のため`main()`で1回だけ計算し、全アイテムで共有する。
+	`local_input_dir`直下へ書き出す（ファイル名はTitle列付きの`_check2_detail_file_name`。
+	申請ごとに別ファイルになるので、複数申請の結果を手元に並べても区別できる）。
+	`definition_parts`／`definition_result_message`はアイテム非依存のため`main()`で1回だけ
+	計算し、全アイテムで共有する。
 
 	戻り値:
-		(check2_line, overall_result) — `InputFileCheckResult`列へ書き込む②分の1行と、
-		②全体のOK/NG
+		(check2_line, overall_result, local_detail_path) — `InputFileCheckResult`列へ書き込む
+		②分の1行、②全体のOK/NG、書き出した②詳細ファイルのローカルパス（呼び出し側が
+		そのままSharePointへアップロードする。ファイル名を2箇所で組み立てて食い違わせないよう、
+		パスは呼び出し側で再構築せずこの戻り値を使うこと）
 	"""
 	ok_lines, ng_lines = [], []
-	local_detail_path = os.path.join(local_input_dir, DETAIL_FILE_NAME_2)
+	local_detail_path = os.path.join(
+		local_input_dir, _check2_detail_file_name(item.get(sp_integration.TITLE_FIELD_INTERNAL_NAME))
+	)
 
 	def record(label, result, message):
 		line = f"{label}{message}"
@@ -188,7 +312,35 @@ def _run_check2(access_token, item, local_input_dir, fallback_dir, definition_pa
 		(gst_result, gst_message),
 		definition_result_message,
 	)
-	return unified_result.build_check2_summary_line(overall_result), overall_result
+	return unified_result.build_check2_summary_line(overall_result), overall_result, local_detail_path
+
+
+def _run_check3(local_input_dir, extra_search_roots, output_path):
+	"""③（HEX/A2Lチェック）を実行し、判定サマリ1行・判定結果・詳細ファイルパスを返す。
+
+	引数:
+		local_input_dir: ダウンロード済み`01_INPUT`のローカルパス
+		extra_search_roots: 追加の探索ルート（①がzipを展開した一時ディレクトリ。
+			`CaseScanResult.work_directory`を渡す。zipが無い案件ではNone）
+		output_path: 詳細ファイルの出力先
+
+	戻り値:
+		(check3_line, check3_overall_result, output_path)
+
+	注意:
+		`check3_overall_result`は`"OK"`/`"NG"`の2値のみ（③は`確認不能`をNGへ畳む）。
+		①の`対象外`のような「詳細ファイルを出さない」状態は無いため、呼び出し側は
+		常に`detail_uploads`へ追加してよい。
+	"""
+	result, reason, detail_message = prof_check.run_check3(local_input_dir, extra_search_roots)
+
+	# ①②の詳細ファイルと同じくBOM付きUTF-8で書く（BOM無しUTF-8はブラウザで直接開いた際に
+	# Shift-JISと誤判定されるため。`check_mao\result.write_result_file`のコメント参照）
+	os.makedirs(os.path.dirname(output_path), exist_ok=True)
+	with open(output_path, "w", encoding="utf-8-sig") as f:
+		f.write(detail_message)
+
+	return unified_result.build_check3_summary_line(result, reason), result, output_path
 
 
 def _process_one_item(access_token, entity_type, item, definition_parts, definition_result_message):
@@ -255,12 +407,25 @@ def _process_one_item(access_token, entity_type, item, definition_parts, definit
 			# ---- ②チェーン（matrix_check/gst_command_check/definition_file_check。RUN_CHECK2時のみ） ----
 			if RUN_CHECK2:
 				fallback_dir = os.path.join(work_directory, "_check2_fallback")
-				check2_line, check2_overall_result = _run_check2(
+				check2_line, check2_overall_result, local_detail_path_2 = _run_check2(
 					access_token, item, local_input_dir, fallback_dir, definition_parts, definition_result_message
 				)
 				own_lines[unified_result.CHECK2_LINE_PREFIX] = check2_line
 				judgment_parts.append(f"②:{check2_overall_result}")
-				detail_uploads.append(os.path.join(local_input_dir, DETAIL_FILE_NAME_2))
+				detail_uploads.append(local_detail_path_2)
+
+			# ---- ③チェーン（prof_scan → xpx_checks。RUN_CHECK3時のみ） ----
+			# ①のzip展開先（scan_result.work_directory）を追加の探索ルートとして渡すことで、
+			# ③はzip展開を自前で実装せず①の成果を再利用する。この展開先は下の
+			# 内側finallyで削除されるため、③は必ずこのtryブロック内で実行する。
+			if RUN_CHECK3:
+				local_detail_path_3 = os.path.join(local_input_dir, DETAIL_FILE_NAME_3)
+				check3_line, check3_overall_result, local_detail_path_3 = _run_check3(
+					local_input_dir, scan_result.work_directory, local_detail_path_3
+				)
+				own_lines[unified_result.CHECK3_LINE_PREFIX] = check3_line
+				judgment_parts.append(f"③:{check3_overall_result}")
+				detail_uploads.append(local_detail_path_3)
 
 			# 集約ファイル（①②③統合の判定サマリ）のURLは、固定名・overwrite=trueでアップロード
 			# するため、アップロード前でも決定的に定まる。列書き戻し（ETagリトライループ）より
@@ -326,14 +491,32 @@ def run():
 	entity_type = sp_integration.get_entity_type_full_name(access_token)
 
 	# ②の定義ファイルチェック（元表比較・○×表チェック）はアイテムに依存しないため、RUN_CHECK2時に
-	# 1回だけ実行し、全アイテムで結果を共有する。
+	# 1回だけ実行し、全アイテムで結果を共有する。元表ファイルもここで1回だけ取得する。
 	definition_parts = None
 	definition_result_message = ("OK", "")
 	if RUN_CHECK2:
-		definition_parts = definition_file_check.check_definition_file_parts(SHAREPOINT_REFERENCE_LOCAL_PATH)
-		definition_result_message = unified_result.combine_results(
-			*[(part_result, part_message) for _, part_result, part_message in definition_parts]
-		)
+		reference_work_dir = tempfile.mkdtemp(prefix="unified_ref_")
+		try:
+			reference_path, reference_error = _resolve_definition_reference(access_token, reference_work_dir)
+			# 取得に失敗しても、XPX定義ファイル側だけで判定できる[fcl_list_o_FI]／[fcl_list_x_FI]は
+			# 通常どおり評価する。存在しないパスを渡すと[元表]は「ファイルを開けない」という
+			# 分かりにくいメッセージでNGになるため、その1件だけ取得失敗の理由へ差し替える。
+			definition_parts = definition_file_check.check_definition_file_parts(
+				reference_path or os.path.join(reference_work_dir, "_未取得.xlsx")
+			)
+			if reference_error:
+				print(reference_error)
+				definition_parts = [
+					(label, part_result,
+						reference_error if label == definition_file_check.MOTOHYOU_SHEET_NAME else part_message)
+					for label, part_result, part_message in definition_parts
+				]
+			definition_result_message = unified_result.combine_results(
+				*[(part_result, part_message) for _, part_result, part_message in definition_parts]
+			)
+		finally:
+			# 元表ファイルは`check_definition_file_parts`が読み終えた時点で不要になる。
+			shutil.rmtree(reference_work_dir, ignore_errors=True)
 
 	for item in items:
 		try:

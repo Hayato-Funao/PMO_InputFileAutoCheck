@@ -39,6 +39,26 @@ def build_check2_summary_line(result):
 	return f"{CHECK2_LABEL}：{result}"
 
 
+CHECK3_LINE_PREFIX = "チェック③"
+
+# 資料スライド5の表題に合わせた文言。スライド9には旧仕様の「ブート領域チェック」と
+# 記載されているが、ブート領域チェックは撤回済み(HEXがブート領域のレコードを持つことは
+# 全ての正常HEXに当てはまり判別能力が無いため)。スライド9側の修正が別途必要。
+CHECK3_LABEL = f"{CHECK3_LINE_PREFIX}（HEX/A2Lチェック）"
+
+
+def build_check3_summary_line(result, reason=None):
+	"""SharePoint列`InputFileCheckResult`へ書き戻す③分の判定サマリ1行を組み立てる。
+
+	`result`は`"OK"`/`"NG"`の2値のみ(③は`確認不能`を`NG`へ畳んでから渡す。
+	PowerAppsが列値の`"NG"`部分文字列で赤/緑を判定するため、`確認不能`のままでは
+	緑になってしまう)。`reason`を渡すと`NG（理由）`の形で理由を併記する。
+	"""
+	if reason:
+		return f"{CHECK3_LABEL}：{result}（{reason}）"
+	return f"{CHECK3_LABEL}：{result}"
+
+
 def merge_check_lines(existing_value, own_lines):
 	"""
 	`InputFileCheckResult`列の既存値(`existing_value`)に、`own_lines`（{行プレフィックス: 新しい行}
