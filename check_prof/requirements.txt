@@ -1,0 +1,10 @@
+# チェック③(HEX/A2Lチェック)は判定ロジック・入力パーサ・テストのすべてを
+# Python標準ライブラリのみで実装しているため、外部ライブラリは不要。
+#
+# ①(check_mao)は`msal`、②(check_fs_matrix)は`openpyxl`を使うが、③は
+# Intel HEX / .epd(Shift_JIS XML属性) / .a2l(ASAP2) をいずれも自前でパースする。
+# SharePoint連携も持たない(③は`check_all\unified_main.py`から同一プロセスで
+# 呼ばれる前提で、SP連携は`check_all`側の`sp_integration.py`が担当する)。
+#
+# したがって本ファイルに記載する依存は無い。
+# `check_all\requirements.txt`(msal + openpyxl)をインストールすれば③も動作する。
