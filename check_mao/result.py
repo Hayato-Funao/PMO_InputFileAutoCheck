@@ -238,6 +238,55 @@ def build_aggregate_file_content(summary_value):
 	return "【チェック結果】\n" + (summary_value or "")
 
 
+def collect_ng_detail_lines(case_check_result):
+	"""
+	案件全体の①結果から、NGに寄与する行だけを重い順に取り出す（2026-09-03新規）。
+
+	`format_case_result_message`（①専用の詳細ファイル本文）は件数・OK情報も含む全量出力だが、
+	集約ファイル（`インプットファイルチェック結果.txt`）はチェック①の行末へNGの主因を
+	カッコで併記する形にしたいため、本関数はNGに寄与する行のみを次の順で返す:
+		- 構造的NG（同種ファイルの重複・ファイル未特定等）
+		- 比較を行えなかったマスク（`skipped_reason`あり）
+		- NG判定となったCAN IDの明細
+	マスクが2件以上ある案件では、どのマスクの行かが分かるようマスクラベルを頭に付ける
+	（1件だけの案件では`format_case_result_message`と同様に省く）。
+
+	集約ファイルが使うのは先頭1件（主因）だけだが、どれを主因とするかの優先順は上記の
+	並び順で表す（構造的NGがあればそれを最優先で見せる）。呼び出し側
+	（`unified_main._process_one_item`）が`[0]`を取る。
+
+	全体判定が"対象外"（照合対象のMAOファイルが1つも無い）の場合は空リストを返す。
+	`structural_ng_messages`は「対象外の理由」として保持されているだけでNGではないため
+	（`build_case_result`のdocstring参照）、NGの主因としては出さない。
+
+	戻り値:
+		NG明細行の文字列リスト（NGが無ければ空リスト）
+	"""
+	if case_check_result.overall_judgment == "対象外":
+		return []
+
+	lines = []
+	for message in case_check_result.structural_ng_messages:
+		lines.append(f"構造的NG: {message}")
+
+	show_mask_label = len(case_check_result.mask_results) > 1
+	for mask_result in case_check_result.mask_results:
+		prefix = f"マスク{mask_result.mask_label}: " if show_mask_label else ""
+		if mask_result.skipped_reason is not None:
+			lines.append(f"{prefix}判定不可（{mask_result.skipped_reason}）")
+			continue
+		for detail in mask_result.check_result.ng_details:
+			missing = "・".join(detail.missing_sources)
+			# 対象ECUは常に固定の「記載なし」文（`_build_target_ecu_display`）のため、集約
+			# ファイルでは省く（詳細ファイル側には従来どおり出す）。
+			lines.append(
+				f"{prefix}CAN ID: {detail.can_id_hex}（10進:{detail.can_id_decimal}） "
+				f"/ MAOラベル: {detail.mao_labels or '(不明)'} "
+				f"/ 欠けている出典: {missing}"
+			)
+	return lines
+
+
 def format_result_message(check_result):
 	"""
 	内部仕様書6節のとおり、CAN ID単位の明細はNG時のみ記載した日本語メッセージを組み立てる

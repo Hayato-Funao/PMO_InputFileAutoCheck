@@ -42,9 +42,10 @@ def _describe_scan(scan_result):
 def _build_detail_message(scan_result, results, input_lines):
 	"""詳細ファイルの本文を組み立てる。
 
-	書式は②の詳細ファイル(`unified_main._write_check2_report`)に合わせ、
-	`実行日時:` → `=== OK ===` → `=== NG ===`の順とする。③固有の情報として
-	入力ファイル一覧と`describe_inputs()`の情報行を前段に足す。
+	書式は`実行日時:` → `=== OK ===` → `=== NG ===`の順とする（元は②の詳細ファイルに
+	合わせた形式。②側は2026-09-03にチェック対象ファイル単位のグループ形式
+	（`check_fs_matrix.check2_report`）へ変更したが、③はこの2セクション形式のまま）。
+	③固有の情報として入力ファイル一覧と`describe_inputs()`の情報行を前段に足す。
 	"""
 	ok_lines = []
 	ng_lines = []

@@ -38,11 +38,9 @@ SharePoint連携コード（`ntlm_proxy.py`/`sp_auth.py`/`sp_integration.py`）�
 """
 
 import os
-import re
 import shutil
 import sys
 import tempfile
-from datetime import datetime
 
 # ---- ①②判定ロジックの参照先 ----------------------------------------------------------
 # 本フォルダ直下に実体コピーした①②の判定ロジックをsys.pathへ追加してimportする（2026-09-02改修。
@@ -79,7 +77,8 @@ from compare import compare_can_id_sources  # noqa: E402
 from mao_can_id import extract_mao_can_id_records  # noqa: E402
 from result import MaskCheckResult  # noqa: E402
 
-import definition_file_check  # noqa: E402  ②分。pure（SharePoint連携に依存しない）のため直接import
+import check2_report  # noqa: E402  ②分。pure（SharePoint連携に依存しない）のため直接import
+import definition_file_check  # noqa: E402
 import gst_command_check  # noqa: E402
 import matrix_check  # noqa: E402
 
@@ -92,7 +91,7 @@ import unified_result  # noqa: E402
 # ---- 設定 ------------------------------------------------------------------------------
 # ②の定義ファイルチェックを実行対象に含めるかどうか（2026-09-02改修でTrueへ切り替え）。
 # Trueにすると②の行が`InputFileCheckResult`列へ加わり、②詳細ファイル
-# （`FSマトリクス_定義ファイルチェック結果_{Title列}.txt`）が案件の`01_INPUT`へアップロードされる。
+# （`FSマトリクス_定義ファイルチェック結果.txt`）が案件の`01_INPUT`へアップロードされる。
 # 【注意】②の定義ファイルチェックは下記2つのローカルパスを参照する:
 #   - `definition_file_check.SERVER_REFERENCE_FILE_PATH`（XPX定義ファイル管理ファイル）
 #   - `SHAREPOINT_REFERENCE_FILE_PATH_OR_URL`（下記。SharePointのURL指定時は実行時にダウンロード）
@@ -106,8 +105,7 @@ RUN_CHECK2 = True
 # 【動確時の確認事項】③がNGになった案件の内訳を必ず見ること。③はHEX/.epd/.a2lの
 # いずれかが未提出ならNGにする（fail-closed）ため、HEXを伴わない申請（CAN情報のみの
 # 変更等）が実在する場合は一律で赤になってしまう。その場合はスコープ判定の追加を検討する。
-# 【2026-09-03改修】①②③を合わせた動作確認のためTrueへ切り替え。
-RUN_CHECK3 = True
+RUN_CHECK3 = False
 
 # ②分の第2参照ファイル（SharePoint上にある特定の申請に紐付かない固定ファイル。②の
 # `input_check_main.SHAREPOINT_REFERENCE_FILE_PATH`と同じ役割）。
@@ -131,27 +129,33 @@ SHAREPOINT_REFERENCE_FILE_PATH_OR_URL = (
 # ①専用の詳細結果（マスク別・NG明細。①`sp_main.DETAIL_FILE_NAME`と同名）
 DETAIL_FILE_NAME_1 = "MAO_CANマトリクス比較結果.txt"
 
-# ②専用の詳細結果（[FS Matrix]／[GSTCommand]／[元表]等の明細。②`input_check_main.DETAIL_FILE_NAME`
-# と同名）の基本ファイル名。実際に出力・アップロードするファイル名は、どの申請の結果か一目で
-# 分かるようTitle列（案件ID）を末尾に付けた`FSマトリクス_定義ファイルチェック結果_{Title列}.txt`
-# （2026-09-02改修。`_check2_detail_file_name`が組み立てる）。中身の書式は②の元実装
-# （`input_check_main.write_report`）と同じ「実行日時 → === OK === → === NG ===」のまま。
+# ②専用の詳細結果（定義ファイル管理Excel／FI FSマトリクスファイル／GSTコマンド装備表の明細。
+# ②`input_check_main.DETAIL_FILE_NAME`と同名）。中身の書式は「実行日時 → チェック対象ファイル
+# 単位の3グループ（各行はOK/NGを文末で表す）」（2026-09-03改修。`check_fs_matrix.check2_report`が
+# 組み立てる。従来の「実行日時 → === OK === → === NG ===」から変更した）。
+#
+# 【2026-09-03改修】2026-09-02に導入したTitle列（案件ID）付きのファイル名
+# （`FSマトリクス_定義ファイルチェック結果_{Title列}.txt`。`_check2_detail_file_name`と
+# ファイル名サニタイズ処理）を取消し、①③と同じ固定名へ戻した。詳細ファイルは案件ごとに
+# 別の`01_INPUT`配下へアップロードするため、固定名でも他案件の結果を上書きすることはなく、
+# ①（MAO_CANマトリクス比較結果.txt）③（HEX_A2Lチェック結果.txt）と名前の付け方が揃う
+# （集約ファイルから「詳細は○○.txt」と案内する場合も、案件ごとに名前が変わらない方が扱いやすい）。
 DETAIL_FILE_NAME_2 = "FSマトリクス_定義ファイルチェック結果.txt"
 
-# ②詳細ファイル名へTitle列の値を埋め込む際に落とす文字。Windowsのファイル名禁止文字
-# (\ / : * ? " < > |) に加え、SharePointのアップロードURL（`Files/add(url='...')`のODataリテラル。
-# `'`が入るとURLが壊れる）やリンクHTML・URLとして解釈される文字（# % & + { } ~）、制御文字も
-# まとめて置換対象にする。
-_FILE_NAME_NG_CHARS = re.compile(r"""[\\/:*?"<>|#%&{}~+'\x00-\x1f]""")
-
-# Title列が長い場合にファイル名が肥大しないよう、埋め込む部分の上限文字数。
-_FILE_NAME_PART_MAX_LEN = 60
-
-# ③専用の詳細結果（①②③の各判定と入力ファイル情報の明細）。書式は②と同じ
-# 「実行日時 → === OK === → === NG ===」。
+# ③専用の詳細結果（①②③の各判定と入力ファイル情報の明細）。書式は
+# 「実行日時 → === OK === → === NG ===」（②は2026-09-03にグループ形式へ変更したが、③は
+# 従来の2セクション形式のまま。`check_prof.prof_check._build_detail_message`が組み立てる）。
 DETAIL_FILE_NAME_3 = "HEX_A2Lチェック結果.txt"
 
 # ①②③統合の判定サマリ（`InputFileCheckResult`列のマージ後値）を書き込む集約ファイル。①②と同名。
+#
+# 【2026-09-03改修】判定サマリ（①②③のOK/NG）だけでは「何がNGなのか」が分からず、3つの詳細
+# ファイルを個別に開く必要があったため、③が元からやっていた`NG（理由）`の形に①②も揃え、
+# 各チェックの行末へNGの主因をカッコで併記するようにした
+# （`unified_result.build_aggregate_file_content`が組み立てる）。ただし②の
+# `定義ファイル管理Excel`グループのNGは主因の候補から除外する（PMO管理の固定ファイルに対する
+# チェックで全案件同じ結果になり、案件担当者が対処できる情報ではないため。②の詳細ファイル
+# `DETAIL_FILE_NAME_2`には従来どおり出る）。
 AGGREGATE_FILE_NAME = "インプットファイルチェック結果.txt"
 
 # `InputFileCheckResult`列の書き戻し（ETagによる楽観的並行制御）のリトライ上限。①②を同一プロセスで
@@ -210,90 +214,82 @@ def _resolve_definition_reference(access_token, work_directory):
 	return local_path, None
 
 
-def _sanitize_file_name_part(value):
-	"""
-	Title列の値を、ファイル名の一部として安全な形へ整える。`_FILE_NAME_NG_CHARS`に該当する文字は
-	`_`へ置換し、空白（全角空白・改行を含む）は`_`へ潰し、前後の`.`／`_`／空白を除去して
-	`_FILE_NAME_PART_MAX_LEN`文字で切る。
-
-	戻り値:
-		整えた文字列。使える文字が1つも残らない場合（Title列が空・記号のみ等）は空文字。
-	"""
-	text = "" if value is None else str(value)
-	text = _FILE_NAME_NG_CHARS.sub("_", text)
-	text = re.sub(r"\s+", "_", text)
-	return text[:_FILE_NAME_PART_MAX_LEN].strip("._ 　")
+def _write_check2_report(groups, output_path):
+	"""②専用の詳細ファイルを、チェック対象ファイル単位の3グループで書き出す
+	（書式は`check_fs_matrix.check2_report`側に集約。2026-09-03改修。従来の
+	`=== OK ===`／`=== NG ===`2セクション構成から変更した）。SharePointへアップロードした
+	ファイルをブラウザで直接開いた際の文字化けを避けるため、①の詳細ファイルと同じ
+	`utf-8-sig`（BOM付きUTF-8）で出力する。"""
+	check2_report.write_report(groups, output_path)
 
 
-def _check2_detail_file_name(case_id):
-	"""
-	②専用の詳細ファイル名`FSマトリクス_定義ファイルチェック結果_{Title列}.txt`を組み立てる。
-
-	Title列が空、またはファイル名に使える文字が1つも残らない場合は接尾辞を付けず
-	`DETAIL_FILE_NAME_2`のままにする（詳細ファイルは申請ごとに別の案件フォルダ配下へ
-	アップロードするため、接尾辞が無くても他の申請の結果を上書きすることはない）。
-	"""
-	suffix = _sanitize_file_name_part(case_id)
-	if not suffix:
-		return DETAIL_FILE_NAME_2
-	stem, extension = os.path.splitext(DETAIL_FILE_NAME_2)
-	return f"{stem}_{suffix}{extension}"
-
-
-def _write_check2_report(ok_lines, ng_lines, output_path):
-	"""②専用の詳細ファイルをOK/NG2セクションで書き出す（②`input_check_main.write_report`と
-	同じ構成）。SharePointへアップロードしたファイルをブラウザで直接開いた際の文字化けを避けるため、
-	①の詳細ファイルと同じ`utf-8-sig`（BOM付きUTF-8）で出力する（②の元実装は`utf-8`のみだったが、
-	①`result.write_result_file`の2026-09-01追補・文字化け対策と同じ理由でこちらも合わせた）。"""
-	os.makedirs(os.path.dirname(output_path), exist_ok=True)
-	timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-	with open(output_path, "w", encoding="utf-8-sig") as f:
-		f.write(f"実行日時: {timestamp}\n\n")
-		f.write("=== OK ===\n")
-		for line in ok_lines:
-			f.write(f"・{line}\n")
-		f.write("\n=== NG ===\n")
-		for line in ng_lines:
-			f.write(f"・{line}\n")
-
-
-def _run_check2(access_token, item, local_input_dir, fallback_dir, definition_parts, definition_result_message):
+def _run_check2(
+	access_token,
+	item,
+	local_input_dir,
+	fallback_dir,
+	definition_parts,
+	definition_result_message,
+	motohyou_index,
+	motohyou_error,
+):
 	"""
 	②分（FSマトリクス↔定義ファイルチェック）を1アイテム分実行し、②専用の詳細ファイルを
-	`local_input_dir`直下へ書き出す（ファイル名はTitle列付きの`_check2_detail_file_name`。
-	申請ごとに別ファイルになるので、複数申請の結果を手元に並べても区別できる）。
-	`definition_parts`／`definition_result_message`はアイテム非依存のため`main()`で1回だけ
-	計算し、全アイテムで共有する。
+	`local_input_dir`直下へ`DETAIL_FILE_NAME_2`（固定名）で書き出す。①③と同じ固定名なので、
+	案件ごとの`01_INPUT`配下では常に同じファイル名になる（2026-09-03改修。Title列を付ける
+	方式は取消。`DETAIL_FILE_NAME_2`のコメント参照）。
+	`definition_parts`／`definition_result_message`／`motohyou_index`／`motohyou_error`は
+	アイテム非依存のため`run()`で1回だけ計算し、全アイテムで共有する。
 
 	戻り値:
-		(check2_line, overall_result, local_detail_path) — `InputFileCheckResult`列へ書き込む
-		②分の1行、②全体のOK/NG、書き出した②詳細ファイルのローカルパス（呼び出し側が
+		(check2_line, overall_result, local_detail_path, ng_detail) — `InputFileCheckResult`列へ
+		書き込む②分の1行、②全体のOK/NG、書き出した②詳細ファイルのローカルパス（呼び出し側が
 		そのままSharePointへアップロードする。ファイル名を2箇所で組み立てて食い違わせないよう、
-		パスは呼び出し側で再構築せずこの戻り値を使うこと）
+		パスは呼び出し側で再構築せずこの戻り値を使うこと）、集約ファイルの②の行末へ併記する
+		NG内容（全グループのNGを全件", "で連ねた文字列。`定義ファイル管理Excel`グループは除外。
+		NGが無ければ空文字。理由は`unified_result.build_aggregate_file_content`のdocstring参照）
 	"""
-	ok_lines, ng_lines = [], []
-	local_detail_path = os.path.join(
-		local_input_dir, _check2_detail_file_name(item.get(sp_integration.TITLE_FIELD_INTERNAL_NAME))
-	)
+	local_detail_path = os.path.join(local_input_dir, DETAIL_FILE_NAME_2)
 
-	def record(label, result, message):
-		line = f"{label}{message}"
-		print(line)
-		(ok_lines if result == "OK" else ng_lines).append(line)
-		_write_check2_report(ok_lines, ng_lines, local_detail_path)
+	# グループ見出し → その下に並べる[(result, message), ...]。チェックが1件終わるたびに
+	# 詳細ファイルを書き直すので、途中で落ちてもそこまでの結果はファイルに残る。
+	groups = [
+		(check2_report.GROUP_FS_MATRIX_DEFINITION, []),
+		(check2_report.GROUP_FS_MATRIX, []),
+		(check2_report.GROUP_GST_COMMAND, []),
+	]
+	group_lines = dict(groups)
 
-	for label, part_result, part_message in definition_parts:
-		record(f"[{label}]", part_result, part_message)
+	def record(group_name, result, message):
+		print(f"[{group_name}]{message}")
+		group_lines[group_name].append((result, message))
+		_write_check2_report(groups, local_detail_path)
 
 	fs_matrix_urls = sp_integration.extract_all_file_urls(item.get(sp_integration.FS_MATRIX_FIELD_INTERNAL_NAME))
+	fs_matrix_local_paths = []
 	if not fs_matrix_urls:
-		matrix_result, matrix_message = "NG", f"{sp_integration.FS_MATRIX_FIELD_INTERNAL_NAME}からリンクを取得できない"
+		# 【2026-09-04改修】`commentSystemMatrix`列が空欄（FSマトリクス未添付）の場合はNGにしない。
+		# 以前は「リンクを取得できない。」でNGにしていたが、添付が無いこと自体を②のNGとして
+		# 扱わない運用に変えた。判定に算入しないOK行として、チェック対象外である旨だけを
+		# 詳細ファイルへ残す（②全体のOK/NGには影響せず、集約ファイルにも何も出ない）。
+		#
+		# 行ごと出さないサイレントスキップ（[GSTコマンド装備表]が添付なしのときの挙動）にはせず、
+		# 1行残す方針にしている。FSマトリクスの未添付は稀なので、詳細ファイルに何も出ないと
+		# 「チェックが動かなかったのか、添付が無かったのか」が後から判別できないため。
+		matrix_parts = [
+			(
+				"OK",
+				f"{sp_integration.FS_MATRIX_FIELD_INTERNAL_NAME}列が空欄のため、"
+				f"FSマトリクスのチェックは対象外。",
+			)
+		]
 	else:
 		fs_matrix_local_paths = [
 			_resolve_local_path(local_input_dir, fallback_dir, access_token, url) for url in fs_matrix_urls
 		]
-		matrix_result, matrix_message = matrix_check.check_matrix_sheet_for_all_files(fs_matrix_local_paths)
-	record("[FS Matrix]", matrix_result, matrix_message)
+		matrix_parts = matrix_check.check_matrix_sheet_parts_for_all_files(fs_matrix_local_paths)
+	for part_result, part_message in matrix_parts:
+		record(check2_report.GROUP_FS_MATRIX, part_result, part_message)
 
 	command_support_urls = [
 		url
@@ -303,16 +299,110 @@ def _run_check2(access_token, item, local_input_dir, fallback_dir, definition_pa
 	command_support_local_paths = [
 		_resolve_local_path(local_input_dir, fallback_dir, access_token, url) for url in command_support_urls
 	]
-	gst_result, gst_message = gst_command_check.check_gst_command_files(command_support_local_paths)
-	if command_support_urls:
-		record("[GSTCommand]", gst_result, gst_message)
+	# 添付が無ければ空リストが返る（サイレントスキップ。[GSTコマンド装備表]の見出しごと出ない）。
+	gst_parts = gst_command_check.check_gst_command_files_parts(command_support_local_paths)
+	for part_result, part_message in gst_parts:
+		record(check2_report.GROUP_GST_COMMAND, part_result, part_message)
 
-	overall_result, overall_message = unified_result.combine_results(
-		(matrix_result, matrix_message),
-		(gst_result, gst_message),
-		definition_result_message,
+	# ---- [FSマトリクス↔定義ファイル管理Excel]グループ ----------------------------------------
+	# 1. 提出FSマトリクス ↔ 定義ファイル管理の`元表`突合（2026-09-04新規）
+	# 2. `fcl_list_o_FI`／`fcl_list_x_FI`の〇/×データ不備（`definition_parts`）
+	# の2段構成で、1がNGなら2は実行しない（2026-09-04。下の打ち切り参照）。
+	#
+	# 元表突合は3つに分かれ、②の判定に算入するのは(a)(b)だけ（詳細は`definition_file_check`の
+	# 見出しコメント参照）。FSマトリクスが1件も無ければいずれも空リストが返る（サイレントスキップ）。
+	#
+	#   (a) コード突合    : FSマトリクスのコードが`元表`に在るか → 無ければNG。判定に算入する。
+	#   (b) 値の突合(HILS): 両方に在るコードの、HILSコード構成要素の食い違い → NG。判定に算入する。
+	#   (c) 値の突合(その他): HILSコード外の列だけの食い違い → 参考情報。判定に算入しない。
+	reconcile_code_parts = definition_file_check.check_fs_matrix_codes_in_motohyou(
+		motohyou_index, motohyou_error, fs_matrix_local_paths
 	)
-	return unified_result.build_check2_summary_line(overall_result), overall_result, local_detail_path
+	reconcile_data_parts, reconcile_data_info_parts = definition_file_check.check_fs_matrix_data_mismatches(
+		motohyou_index, motohyou_error, fs_matrix_local_paths
+	)
+	for part_result, part_message in (
+		reconcile_code_parts + reconcile_data_parts + reconcile_data_info_parts
+	):
+		record(check2_report.GROUP_FS_MATRIX_DEFINITION, part_result, part_message)
+
+	# 【元表突合がNGなら定義ファイル管理Excelのチェックを打ち切る】2026-09-04。
+	# 提出FSマトリクスと`元表`が食い違っている状態では、同じ定義ファイルの〇/×シートを
+	# 検査しても意味のある結果にならない（まずFSマトリクス側を直す必要がある）ため、
+	# `fcl_list_o_FI`／`fcl_list_x_FI`の行は出さず、②の判定にも算入しない。
+	# 判定に算入する(a)(b)だけで打ち切りを判断する（(c)の参考情報では打ち切らない）。
+	#
+	# `definition_parts`自体は`run()`が実行ごとに1回だけ計算済みなので、ここでの打ち切りは
+	# 「報告と判定に使わない」という意味（計算をやり直したり省いたりはしない）。
+	reconcile_is_ng = any(
+		part_result != "OK"
+		for part_result, _message in (reconcile_code_parts + reconcile_data_parts)
+	)
+	if reconcile_is_ng:
+		record(
+			check2_report.GROUP_FS_MATRIX_DEFINITION,
+			"OK",
+			f"上記のとおりFSマトリクスと元表シートが一致しないため、"
+			f"「{definition_file_check.OK_SHEET_NAME}」／「{definition_file_check.NG_SHEET_NAME}」の"
+			f"チェックは実施しない。",
+		)
+	else:
+		for _label, part_result, part_message in definition_parts:
+			record(check2_report.GROUP_FS_MATRIX_DEFINITION, part_result, part_message)
+
+	# 詳細ファイルは全チェック分を箇条書きで残すが、`InputFileCheckResult`列は1件しか
+	# 持てないため、ここで②全体の1件へまとめる（1つでもNGなら最初のNGのmessage）。
+	#
+	# 元表突合のうち、②の判定に算入するのは(a)コード突合と(b)HILSコードに影響する値の不一致
+	# （2026-09-04。どちらもXPXが引き当てられない状態を確定させるため）。
+	# (c)HILSコード外だけの不一致（`reconcile_data_info_parts`）は参考情報なので**渡さない**
+	# （DWGの改訂差だけで100件超になるのが常態で、算入すると全案件がNGになる）。
+	# `definition_result_message`は打ち切り時に渡さない（上記の打ち切り参照）。
+	overall_result, overall_message = unified_result.combine_results(
+		*matrix_parts,
+		*gst_parts,
+		*reconcile_code_parts,
+		*reconcile_data_parts,
+		*([] if reconcile_is_ng else [definition_result_message]),
+	)
+
+	# 集約ファイルの②の行末へ併記するNG内容。①③が主因1件だけなのに対し、②は**全グループの
+	# NGを全件**並べる（2026-09-03改修。以前は最初の1件だけを出していたため、
+	# [FI FSマトリクスファイル]と[GSTコマンド装備表]の両方がNGの案件で後者が集約ファイルから
+	# 消えていた）。前置きの文（「〜にデータ不備がある。」）は`extract_defect_detail`で落とし、
+	# 不備箇所（`[FI FSmatrix / Z列] Z11 が ○/× ではありません: '※'`）だけを", "で連ねる。
+	#
+	# `check2_report.GROUPS_EXCLUDED_FROM_AGGREGATE`のグループ（`定義ファイル管理Excel`と
+	# `FSマトリクス↔元表突合`。除外理由は同定数のコメント参照）は除外する。除外の結果NG内容が
+	# 0件になることはあり得るが、`InputFileCheckResult`列の②行は上の`overall_result`のまま
+	# NGを保つ（除外は集約ファイルの表示だけの話であり、判定は変えない）。`overall_message`を
+	# 使わないのは、そちらが除外対象グループの分も含んでしまう上に最初の1件しか持たないため。
+	ng_details = [
+		check2_report.extract_defect_detail(message)
+		for group_name, group_lines in groups
+		if group_name not in check2_report.GROUPS_EXCLUDED_FROM_AGGREGATE
+		for part_result, message in group_lines
+		if part_result != "OK"
+	]
+
+	# `FSマトリクス↔元表突合`グループは上の除外対象だが、**判定に算入する2件のNGだけ**は
+	# 集約ファイルにも出す（2026-09-04）。欠落コード・不一致の一覧は②の詳細ファイル側にだけ置き、
+	# 集約ファイルへは「元表シートにない」「データが一致しない」（または「確認できない」）ことだけを
+	# 短文で示す。グループ単位の除外では同グループ内の参考情報行（HILSコード外だけの不一致）まで
+	# 出てしまうため、行単位でここで足す。
+	for reconcile_summary in (
+		definition_file_check.code_check_aggregate_summary(reconcile_code_parts),
+		definition_file_check.data_check_aggregate_summary(reconcile_data_parts),
+	):
+		if reconcile_summary:
+			ng_details.append(reconcile_summary)
+
+	return (
+		unified_result.build_check2_summary_line(overall_result),
+		overall_result,
+		local_detail_path,
+		", ".join(ng_details),
+	)
 
 
 def _run_check3(local_input_dir, extra_search_roots, output_path):
@@ -331,6 +421,10 @@ def _run_check3(local_input_dir, extra_search_roots, output_path):
 		`check3_overall_result`は`"OK"`/`"NG"`の2値のみ（③は`確認不能`をNGへ畳む）。
 		①の`対象外`のような「詳細ファイルを出さない」状態は無いため、呼び出し側は
 		常に`detail_uploads`へ追加してよい。
+
+		`check3_line`は元から`NG（理由）`の形でNGの主因を含む（`build_check3_summary_line`）。
+		集約ファイルで①②の行末へ主因を併記する処理（`unified_result.ng_reasons`）に③を
+		渡さないのはこのため。
 	"""
 	result, reason, detail_message = prof_check.run_check3(local_input_dir, extra_search_roots)
 
@@ -343,7 +437,15 @@ def _run_check3(local_input_dir, extra_search_roots, output_path):
 	return unified_result.build_check3_summary_line(result, reason), result, output_path
 
 
-def _process_one_item(access_token, entity_type, item, definition_parts, definition_result_message):
+def _process_one_item(
+	access_token,
+	entity_type,
+	item,
+	definition_parts,
+	definition_result_message,
+	motohyou_index,
+	motohyou_error,
+):
 	"""
 	1件のSubmittedアイテムを処理する（①チェーンは必ず実行、②チェーンは`RUN_CHECK2`時のみ）。
 	①②の行をまとめて1回のMERGEで`InputFileCheckResult`列へ書き戻す。
@@ -398,21 +500,58 @@ def _process_one_item(access_token, entity_type, item, definition_parts, definit
 			judgment_parts = [f"①:{case_check_result.overall_judgment}"]
 			detail_uploads = []
 
+			# 集約ファイル（`AGGREGATE_FILE_NAME`）で各チェックの行末へ併記するNGの主因
+			# （2026-09-03新規。1チェック＝1行・主因1件のみ）。③は`check3_line`が元から
+			# `NG（理由）`の形で主因を含むため渡さない。
+			check1_ng_lines = check1_result.collect_ng_detail_lines(case_check_result)
+			ng_reasons = {
+				check1_result.CHECK1_LINE_PREFIX: check1_ng_lines[0] if check1_ng_lines else None
+			}
+
+			# 集約ファイルで各チェックの行末へ併記する詳細ファイルの場所（2026-09-04新規）。
+			# 詳細ファイルを実際に出力したチェックだけを入れる（①が`対象外`の案件や
+			# `RUN_CHECK2`／`RUN_CHECK3`がFalseのときは、そのチェックのキーを入れない）。
+			# 場所は集約ファイル自身のリンク（`log_html`）と同じサーバー相対URLで表す。
+			detail_paths = {}
+
+			def _register_detail_path(line_prefix, detail_file_name):
+				"""詳細ファイル名から`01_INPUT`配下の絶対URLを作り、併記対象へ登録する。
+
+				場所の決め方は集約ファイル自身と同じ`result_file_server_relative_url`に揃える
+				（固定名・overwrite=trueなのでアップロード前でも決定的に定まる）。そのうえで
+				`build_absolute_url`でホストを付けた絶対URLにする（2026-09-04改修。サーバー相対
+				URLのままだとコピーしてブラウザへ貼っても開けなかったため）。"""
+				detail_paths[line_prefix] = sp_integration.build_absolute_url(
+					sp_integration.result_file_server_relative_url(
+						input_folder_server_relative, detail_file_name
+					)
+				)
+
 			if case_check_result.overall_judgment != "対象外":
 				detail_message = check1_result.format_case_result_message(case_check_result)
 				local_detail_path_1 = os.path.join(local_input_dir, DETAIL_FILE_NAME_1)
 				check1_result.write_result_file(detail_message, local_detail_path_1)
 				detail_uploads.append(local_detail_path_1)
+				_register_detail_path(check1_result.CHECK1_LINE_PREFIX, DETAIL_FILE_NAME_1)
 
 			# ---- ②チェーン（matrix_check/gst_command_check/definition_file_check。RUN_CHECK2時のみ） ----
 			if RUN_CHECK2:
 				fallback_dir = os.path.join(work_directory, "_check2_fallback")
-				check2_line, check2_overall_result, local_detail_path_2 = _run_check2(
-					access_token, item, local_input_dir, fallback_dir, definition_parts, definition_result_message
+				check2_line, check2_overall_result, local_detail_path_2, check2_ng_detail = _run_check2(
+					access_token,
+					item,
+					local_input_dir,
+					fallback_dir,
+					definition_parts,
+					definition_result_message,
+					motohyou_index,
+					motohyou_error,
 				)
 				own_lines[unified_result.CHECK2_LINE_PREFIX] = check2_line
 				judgment_parts.append(f"②:{check2_overall_result}")
 				detail_uploads.append(local_detail_path_2)
+				ng_reasons[unified_result.CHECK2_LINE_PREFIX] = check2_ng_detail
+				_register_detail_path(unified_result.CHECK2_LINE_PREFIX, DETAIL_FILE_NAME_2)
 
 			# ---- ③チェーン（prof_scan → xpx_checks。RUN_CHECK3時のみ） ----
 			# ①のzip展開先（scan_result.work_directory）を追加の探索ルートとして渡すことで、
@@ -426,6 +565,7 @@ def _process_one_item(access_token, entity_type, item, definition_parts, definit
 				own_lines[unified_result.CHECK3_LINE_PREFIX] = check3_line
 				judgment_parts.append(f"③:{check3_overall_result}")
 				detail_uploads.append(local_detail_path_3)
+				_register_detail_path(unified_result.CHECK3_LINE_PREFIX, DETAIL_FILE_NAME_3)
 
 			# 集約ファイル（①②③統合の判定サマリ）のURLは、固定名・overwrite=trueでアップロード
 			# するため、アップロード前でも決定的に定まる。列書き戻し（ETagリトライループ）より
@@ -455,9 +595,32 @@ def _process_one_item(access_token, entity_type, item, definition_parts, definit
 			for local_path in detail_uploads:
 				sp_integration.upload_result_file(access_token, input_folder_server_relative, local_path)
 
+			# `RUN_CHECK2`／`RUN_CHECK3`がFalseでこの実行では走らなかったチェックでも、列に行が
+			# 残っている場合（過去の実行で書かれた行が`merge_check_lines`で保持される）は、その
+			# 詳細ファイルも過去の実行時に同じ`01_INPUT`へ固定名でアップロードされている。
+			# 行があるのに場所だけ空欄になるのを避けるため、ここで補完する（2026-09-04追加。
+			# `RUN_CHECK3=False`の運用で③の行だけ詳細の併記が無い状態になっていたため）。
+			#
+			# ①はフラグ制御が無く常に実行されるので対象外にしている（`対象外`判定の案件は詳細
+			# ファイルを出さないため、上の明示登録に任せて補完してはいけない）。
+			for line_prefix, detail_file_name in (
+				(unified_result.CHECK2_LINE_PREFIX, DETAIL_FILE_NAME_2),
+				(unified_result.CHECK3_LINE_PREFIX, DETAIL_FILE_NAME_3),
+			):
+				if line_prefix in detail_paths:
+					continue
+				if any(line.startswith(line_prefix) for line in (merged or "").splitlines()):
+					_register_detail_path(line_prefix, detail_file_name)
+
 			# 列に書き戻した最終的な値（＝真実の源）から集約ファイル本文を再生成し、固定名で
-			# アップロードする（overwrite=true）。
-			aggregate_content = check1_result.build_aggregate_file_content(merged)
+			# アップロードする（overwrite=true）。各チェックの行末にはNGの主因（2026-09-03改修。
+			# ②の`定義ファイル管理Excel`分は`_run_check2`で除外済み）と、詳細ファイルの場所
+			# （2026-09-04追加）を併記する。
+			# 併記するのは集約ファイルだけで、列（`merged`）の値は従来どおり
+			# `チェック①（...）：NG`のまま（PowerAppsの表示を変えないため）。
+			aggregate_content = unified_result.build_aggregate_file_content(
+				merged, ng_reasons, detail_paths
+			)
 			local_aggregate_path = os.path.join(local_input_dir, AGGREGATE_FILE_NAME)
 			check1_result.write_result_file(aggregate_content, local_aggregate_path)
 			sp_integration.upload_result_file(access_token, input_folder_server_relative, local_aggregate_path)
@@ -494,34 +657,71 @@ def run():
 	# 1回だけ実行し、全アイテムで結果を共有する。元表ファイルもここで1回だけ取得する。
 	definition_parts = None
 	definition_result_message = ("OK", "")
+	# 元表突合用のインデックス（2026-09-04新規）。`元表`はアイテム非依存なので、3MB超のxlsmを
+	# 案件ごとに開かないよう実行ごとに1回だけ読む。読めなかった場合は理由(`motohyou_error`)を
+	# そのまま各アイテムの[FSマトリクス↔元表突合]グループのNGメッセージへ出す。
+	motohyou_index = None
+	motohyou_error = None
 	if RUN_CHECK2:
-		reference_work_dir = tempfile.mkdtemp(prefix="unified_ref_")
-		try:
-			reference_path, reference_error = _resolve_definition_reference(access_token, reference_work_dir)
-			# 取得に失敗しても、XPX定義ファイル側だけで判定できる[fcl_list_o_FI]／[fcl_list_x_FI]は
-			# 通常どおり評価する。存在しないパスを渡すと[元表]は「ファイルを開けない」という
-			# 分かりにくいメッセージでNGになるため、その1件だけ取得失敗の理由へ差し替える。
-			definition_parts = definition_file_check.check_definition_file_parts(
-				reference_path or os.path.join(reference_work_dir, "_未取得.xlsx")
+		# 【2026-09-04 元表比較を無効化】`元表`シートをSP上の元表ファイル
+		# （`SHAREPOINT_REFERENCE_FILE_PATH_OR_URL`）の`FI FSmatrix`シートと突き合わせる条件を
+		# コメントアウトしたため、その比較専用だったSP側元表ファイルのダウンロードも止めた
+		# （読み手のいないファイルを実行ごとにRESTで取得しないため）。
+		# `check_definition_file_parts`は[fcl_list_o_FI]／[fcl_list_x_FI]の2件だけを返す。
+		# 再開する場合はこのブロックのコメントを外し、下の引数なし呼び出しを消して、
+		# `definition_file_check.check_definition_file_parts`側のコメントも戻すこと。
+		#
+		# reference_work_dir = tempfile.mkdtemp(prefix="unified_ref_")
+		# try:
+		# 	reference_path, reference_error = _resolve_definition_reference(access_token, reference_work_dir)
+		# 	# 取得に失敗しても、XPX定義ファイル側だけで判定できる[fcl_list_o_FI]／[fcl_list_x_FI]は
+		# 	# 通常どおり評価する。存在しないパスを渡すと[元表]は「ファイルを開けない」という
+		# 	# 分かりにくいメッセージでNGになるため、その1件だけ取得失敗の理由へ差し替える。
+		# 	definition_parts = definition_file_check.check_definition_file_parts(
+		# 		reference_path or os.path.join(reference_work_dir, "_未取得.xlsx")
+		# 	)
+		# 	if reference_error:
+		# 		print(reference_error)
+		# 		# 結果ログの文体を崩さないよう、取得失敗の理由も[元表]行の文へ埋め込む。
+		# 		motohyou_unavailable = definition_file_check.motohyou_unavailable_message(reference_error)
+		# 		definition_parts = [
+		# 			(label, part_result,
+		# 				motohyou_unavailable if label == definition_file_check.MOTOHYOU_SHEET_NAME else part_message)
+		# 			for label, part_result, part_message in definition_parts
+		# 		]
+		# 	definition_result_message = unified_result.combine_results(
+		# 		*[(part_result, part_message) for _, part_result, part_message in definition_parts]
+		# 	)
+		# finally:
+		# 	# 元表ファイルは`check_definition_file_parts`が読み終えた時点で不要になる。
+		# 	shutil.rmtree(reference_work_dir, ignore_errors=True)
+		definition_parts = definition_file_check.check_definition_file_parts()
+		definition_result_message = unified_result.combine_results(
+			*[(part_result, part_message) for _, part_result, part_message in definition_parts]
+		)
+
+		# 元表突合用のインデックスも同じくアイテム非依存なので、ここで1回だけ読む。
+		# 読めない場合も例外にせず理由を持ち回る（突合だけがNGになり、②の他のチェックは続行する）。
+		motohyou_index, motohyou_error = definition_file_check.load_motohyou_index()
+		if motohyou_error:
+			print(f"[{check2_report.GROUP_FS_MATRIX_DEFINITION}]元表を読めないため突合できない: {motohyou_error}")
+		else:
+			print(
+				f"[{check2_report.GROUP_FS_MATRIX_DEFINITION}]元表を読み込み: "
+				f"{motohyou_index['name']}（担当区{definition_file_check.RECONCILE_TARGET_DEPT}の"
+				f"突合対象{motohyou_index['row_count']}行）"
 			)
-			if reference_error:
-				print(reference_error)
-				definition_parts = [
-					(label, part_result,
-						reference_error if label == definition_file_check.MOTOHYOU_SHEET_NAME else part_message)
-					for label, part_result, part_message in definition_parts
-				]
-			definition_result_message = unified_result.combine_results(
-				*[(part_result, part_message) for _, part_result, part_message in definition_parts]
-			)
-		finally:
-			# 元表ファイルは`check_definition_file_parts`が読み終えた時点で不要になる。
-			shutil.rmtree(reference_work_dir, ignore_errors=True)
 
 	for item in items:
 		try:
 			item_id, case_id, judgment, message = _process_one_item(
-				access_token, entity_type, item, definition_parts, definition_result_message
+				access_token,
+				entity_type,
+				item,
+				definition_parts,
+				definition_result_message,
+				motohyou_index,
+				motohyou_error,
 			)
 			line = f"item {item_id}（{case_id}）: {judgment}\n{message}"
 		except Exception as e:

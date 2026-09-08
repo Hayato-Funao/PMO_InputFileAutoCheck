@@ -59,6 +59,89 @@ def build_check3_summary_line(result, reason=None):
 	return f"{CHECK3_LABEL}：{result}"
 
 
+# 集約ファイルで詳細ファイルの場所を併記するときの見出し語（2026-09-04新規）。
+AGGREGATE_DETAIL_LABEL = "詳細"
+
+
+def build_aggregate_file_content(summary_value, ng_reasons=None, detail_paths=None):
+	"""
+	集約ファイル（`インプットファイルチェック結果.txt`）の本文を組み立てる（2026-09-03新規）。
+
+	従来は①の`result.build_aggregate_file_content`（見出し＋`InputFileCheckResult`列の値を
+	そのまま）を使っており、①②③のOK/NGしか分からず「何がNGなのか」は3つの詳細ファイルを
+	個別に開かないと読めなかった。本関数は各チェックの行末へNGの主因と詳細ファイルの場所を
+	カッコで併記し、集約ファイルだけで「どのチェックがなぜNGで、続きはどこを見るのか」が
+	読めるようにする。
+
+	出力例:
+
+		【チェック結果】
+		チェック①（MAO↔CANマトリクスチェック）：NG（CAN ID: 112h（10進:274） / MAOラベル: F_FCAN112OK / 欠けている出典: CANマトリクス）（詳細: /sites/jphgt105596/.../01_INPUT/MAO_CANマトリクス比較結果.txt）
+		チェック②（FSマトリクス↔定義ファイルチェック）：OK（詳細: /sites/jphgt105596/.../01_INPUT/FSマトリクス_定義ファイルチェック結果.txt）
+		チェック③（HEX/A2Lチェック）：NG（A2L↔epd 先頭アドレス一致を確認できず）（詳細: /sites/jphgt105596/.../01_INPUT/HEX_A2Lチェック結果.txt）
+
+	【詳細ファイルの場所を併記する】2026-09-04追加。①②③の詳細ファイルは案件ごとの
+	`01_INPUT`直下（集約ファイル自身と同じフォルダ）へアップロードされる。どのチェックの続きが
+	どのファイルなのかを集約ファイルだけで辿れるよう、OK/NGに関わらず行末へ併記する
+	（NGの主因がある場合は「主因のカッコ」→「詳細のカッコ」の順で2つ並ぶ）。
+	詳細ファイルを出さないチェック（①が`対象外`の案件、`RUN_CHECK2`／`RUN_CHECK3`がFalseの
+	とき、PMOの手動編集行など）には併記しない。呼び出し側が`detail_paths`へそのチェックの
+	キーを渡さなければよい。
+
+	【1チェック＝1行】NGが複数件あっても行は増やさない。行末のカッコに何件入れるかは
+	チェックごとに違う（2026-09-03決定）:
+		- ①: 主因1件のみ。NGのCAN IDが数十件になる案件があり、全件を併記すると1行が
+		  読めない長さになるため（優先順は`result.collect_ng_detail_lines`の並び順）。
+		- ②: 全グループのNGを全件（呼び出し側が", "で連結して渡す）。[FI FSマトリクス
+		  ファイル]と[GSTコマンド装備表]の両方がNGの案件で片方が消えないようにするため。
+		- ③: `build_check3_summary_line`が元から`NG（理由）`の形で主因1件を持つため、
+		  ③分は`ng_reasons`へ渡さない（列の値のまま出る）。
+	いずれの場合も全件は従来どおり各チェックの詳細ファイル（`MAO_CANマトリクス比較結果.txt`／
+	`FSマトリクス_定義ファイルチェック結果.txt`／`HEX_A2Lチェック結果.txt`）で確認できる。
+
+	【②の`定義ファイル管理Excel`を除く運用】②の3グループのうち`定義ファイル管理Excel`
+	（元表比較・fcl_list_o_FI／fcl_list_x_FIのデータ不備）は、案件のインプットではなく
+	PMO側が管理する固定ファイルに対するチェックであり、全案件で同じ結果になる。案件担当者が
+	集約ファイルを見て対処できる情報ではないため、併記の対象から外す（除外は呼び出し側
+	（`unified_main._run_check2`）でグループ単位に行う。②の詳細ファイルには従来どおり出る）。
+	その結果②のNG内容が0件になることはあり得るが、その場合は列の値のまま`：NG`だけを出す
+	（判定は変えない）。
+
+	引数:
+		summary_value: `InputFileCheckResult`列のマージ後の値（`merge_check_lines`の戻り値）
+		ng_reasons: {行プレフィックス: 併記するNG内容の文字列}。`merge_check_lines`の
+			`own_lines`と同じキー（`result.CHECK1_LINE_PREFIX`／`CHECK2_LINE_PREFIX`）で
+			渡す。値が空（NG無し・除外で何も残らない）のチェックは何も併記しない。
+		detail_paths: {行プレフィックス: 詳細ファイルの場所}。同じキーで渡す。OK/NGに
+			関わらず併記する。渡さなかったチェックには何も併記しない。
+
+	戻り値:
+		集約ファイルへ書き出す本文（末尾に改行は付けない。`result.write_result_file`が付ける）
+	"""
+	from result import build_aggregate_file_content as build_summary_section  # ①の見出し付けを流用
+
+	reasons = {prefix: reason for prefix, reason in (ng_reasons or {}).items() if reason}
+	paths = {prefix: path for prefix, path in (detail_paths or {}).items() if path}
+	if not reasons and not paths:
+		return build_summary_section(summary_value)
+
+	lines = []
+	for line in (summary_value or "").splitlines():
+		# 1行1チェックを崩さないよう、併記する文字列中の改行は空白へ潰す
+		# （②`check2_report.build_body`と同じ扱い）。
+		for prefix, reason in reasons.items():
+			if line.startswith(prefix):
+				line = f"{line}（{' '.join(str(reason).splitlines())}）"
+				break
+		for prefix, path in paths.items():
+			if line.startswith(prefix):
+				line = f"{line}（{AGGREGATE_DETAIL_LABEL}: {' '.join(str(path).splitlines())}）"
+				break
+		lines.append(line)
+
+	return build_summary_section("\n".join(lines))
+
+
 def merge_check_lines(existing_value, own_lines):
 	"""
 	`InputFileCheckResult`列の既存値(`existing_value`)に、`own_lines`（{行プレフィックス: 新しい行}

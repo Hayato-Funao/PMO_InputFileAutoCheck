@@ -34,11 +34,11 @@ import os
 import re
 import sys
 import tempfile
-from datetime import datetime
 from urllib.parse import urlparse
 
 import msal
 
+import check2_report
 import definition_file_check
 import gst_command_check
 import matrix_check
@@ -432,48 +432,45 @@ def combine_results(*checks):
     return "OK", " / ".join(message for _, message in checks if message)
 
 
-def record_result(ok_lines, ng_lines, label, result, message):
-    """Prints "{label}: {result} {message}" to the console, appends that
-    same line to ok_lines or ng_lines depending on result, then immediately
-    rewrites DETAIL_LOCAL_PATH with the current state of both lists - so the
-    report reflects everything checked so far even if the run stops
-    partway through, rather than only being written once at the very end."""
-    line = f"{label}: {result} {message}"
-    print(line)
-    (ok_lines if result == "OK" else ng_lines).append(line)
-    write_report(ok_lines, ng_lines)
+def new_report_groups():
+    """DETAIL_LOCAL_PATHへ書き出す結果ログのグループ構造（[(見出し, 行リスト), ...]）を
+    作る。見出しの順序がそのまま出力順になる（2026-09-03改修。従来の`=== OK ===`／
+    `=== NG ===`2セクション構成から、チェック対象ファイル単位の3グループへ変更した）。
+
+    戻り値:
+        (groups, group_lines) — groupsは`check2_report.build_body`へそのまま渡す構造、
+        group_linesは見出し名で行リストを引ける同じリストの辞書ビュー
+        （`record_check_result`が追記に使う）
+    """
+    groups = [
+        (check2_report.GROUP_DEFINITION_FILE, []),
+        (check2_report.GROUP_FS_MATRIX, []),
+        (check2_report.GROUP_GST_COMMAND, []),
+    ]
+    return groups, dict(groups)
 
 
-def record_check_result(ok_lines, ng_lines, label, result, message):
-    """Records one specific check's result as its own line, prefixed with
-    `label` (e.g. "[FS Matrix]") - so different checks (FS Matrix, GST
-    Command Support) that concern different files never get merged into one
-    combined line. Always uses the check's own message - on OK that message
-    already combines the sheet-found result with the 〇/× symbol-check
-    result (see check_matrix_sheet/check_sid_list_sheet); on NG it names the
-    specific file/cell that failed."""
-    line = f"{label}{message}"
-    print(line)
-    (ok_lines if result == "OK" else ng_lines).append(line)
-    write_report(ok_lines, ng_lines)
+def record_check_result(groups, group_lines, group_name, result, message):
+    """Records one check's result as its own bullet under `group_name`
+    (e.g. check2_report.GROUP_FS_MATRIX) - so different checks that concern
+    different files never get merged into one combined line. Always uses the
+    check's own message: it is already written as a full sentence whose
+    ending states the verdict (ある／ない、一致している／一致していない), with
+    the offending sheet/cell named after it on NG - see
+    check_matrix_sheet_parts / check_sid_list_sheet_parts /
+    check_definition_file_parts."""
+    print(f"[{group_name}]{message}")
+    group_lines[group_name].append((result, message))
+    write_report(groups)
 
 
-def write_report(ok_lines, ng_lines):
-    """Writes DETAIL_LOCAL_PATH in two sections - every OK result first, then
-    every NG result - each line prefixed with a bullet (・), with a
+def write_report(groups):
+    """Writes DETAIL_LOCAL_PATH from the current state of `groups`, with a
     timestamp of when the report was (last) written at the top. Since this
     is called after every single result, that timestamp reflects the most
-    recent update, not just when the run started."""
-    os.makedirs(os.path.dirname(DETAIL_LOCAL_PATH), exist_ok=True)
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(DETAIL_LOCAL_PATH, "w", encoding="utf-8") as f:
-        f.write(f"実行日時: {timestamp}\n\n")
-        f.write("=== OK ===\n")
-        for line in ok_lines:
-            f.write(f"・{line}\n")
-        f.write("\n=== NG ===\n")
-        for line in ng_lines:
-            f.write(f"・{line}\n")
+    recent update, not just when the run started, and the report reflects
+    everything checked so far even if the run stops partway through."""
+    check2_report.write_report(groups, DETAIL_LOCAL_PATH, encoding="utf-8")
 
 
 def main():
@@ -508,16 +505,16 @@ def main():
     for item in items:
         item_id = item.get("Id")
 
-        ok_lines = []
-        ng_lines = []
-        for label, part_result, part_message in definition_parts:
-            record_check_result(ok_lines, ng_lines, f"[{label}]", part_result, part_message)
+        groups, group_lines = new_report_groups()
+        for _label, part_result, part_message in definition_parts:
+            record_check_result(groups, group_lines, check2_report.GROUP_DEFINITION_FILE, part_result, part_message)
 
         file_urls = extract_all_file_urls(item.get(FILE_PATH_FIELD_INTERNAL_NAME))
         if not file_urls:
-            result, message = "NG", f"{FILE_PATH_FIELD_INTERNAL_NAME}からリンクを取得できない"
+            result, message = "NG", f"{FILE_PATH_FIELD_INTERNAL_NAME}からリンクを取得できない。"
             write_check_result(access_token, entity_type, item_id, result, message)
-            record_result(ok_lines, ng_lines, f"item {item_id}", result, message)
+            # 提出物そのものが取れないので、FSマトリクスファイルの行としてその理由を残す。
+            record_check_result(groups, group_lines, check2_report.GROUP_FS_MATRIX, result, message)
             continue
 
         names = [os.path.basename(file_url) for file_url in file_urls]
@@ -554,9 +551,9 @@ def main():
                 download_file(access_token, file_url, local_path)
                 local_paths.append(local_path)
 
-            matrix_result, matrix_message = matrix_check.check_matrix_sheet_for_all_files(local_paths)
+            matrix_parts = matrix_check.check_matrix_sheet_parts_for_all_files(local_paths)
 
-            # check_gst_command_files() itself returns OK/"" when
+            # check_gst_command_files_parts() itself returns [] when
             # command_support_urls is empty - no separate skip needed here.
             command_support_local_paths = []
             for url in command_support_urls:
@@ -564,23 +561,24 @@ def main():
                 download_file(access_token, url, local_path)
                 command_support_local_paths.append(local_path)
 
-            gst_result, gst_message = gst_command_check.check_gst_command_files(command_support_local_paths)
+            gst_parts = gst_command_check.check_gst_command_files_parts(command_support_local_paths)
 
-        # Each check concerns a different file, so each gets its own report
-        # line instead of being merged into one combined message. GST is
-        # only reported when there was actually a matching file to check
-        # (same "skip silently" rule as before) - otherwise there's nothing
-        # to say about it.
-        record_check_result(ok_lines, ng_lines, "[FS Matrix]", matrix_result, matrix_message)
-        if command_support_urls:
-            record_check_result(ok_lines, ng_lines, "[GSTCommand]", gst_result, gst_message)
+        # Each check concerns a different file, so each gets its own bullet
+        # under its own group heading instead of being merged into one
+        # combined line. GST contributes no bullets at all when there was no
+        # matching file to check (same "skip silently" rule as before) - its
+        # heading is then left out of the report entirely.
+        for part_result, part_message in matrix_parts:
+            record_check_result(groups, group_lines, check2_report.GROUP_FS_MATRIX, part_result, part_message)
+        for part_result, part_message in gst_parts:
+            record_check_result(groups, group_lines, check2_report.GROUP_GST_COMMAND, part_result, part_message)
 
         # ②自身の統合OK/NGは従来どおりcombine_resultsで求めるが、①(check_mao)とのマージに伴い、
         # `InputFileCheckResult`列へ書き込む値は生の"OK"/"NG"ではなく②分の1行
         # （`チェック②（...）：OK/NG`）に変換する（2026-09-02改修）。
         result, message = combine_results(
-            (matrix_result, matrix_message),
-            (gst_result, gst_message),
+            *matrix_parts,
+            *gst_parts,
             (definition_result, definition_message),
         )
         check2_line = build_check2_summary_line(result)

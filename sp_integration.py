@@ -368,11 +368,27 @@ def upload_result_file(access_token, server_relative_folder, local_file_path):
 	return resp.json()["d"]["ServerRelativeUrl"]
 
 
+def build_absolute_url(server_relative_url):
+	"""サーバー相対URL（`/sites/jphgt105596/Shared Documents/.../01_INPUT/xxx.txt`）を、
+	ブラウザへ貼り付けてそのまま開ける絶対URLへ変換する（2026-09-04新規）。
+
+	サーバー相対URLのままだとスキームとホストが無いため、コピーしてブラウザのアドレスバーへ
+	貼っても開けない。`SITE_URL`からホスト部分だけを取り出して前へ付ける
+	（`SITE_URL`自体は`/sites/jphgt105596`まで含むので、そのまま連結すると`/sites/...`が
+	二重になる点に注意）。
+
+	空白は`%20`へ変換する（ライブラリ名`Shared Documents`に空白が入るため）。空白を含む
+	URLは、テキストファイル中で1つのトークンとして扱われず、ダブルクリック選択やメーラーの
+	自動リンク化がそこで切れてしまう。日本語部分はエンコードしない（ブラウザはそのまま解釈でき、
+	`%E5%B9%B4...`にすると人が読めなくなるため）。
+	"""
+	site_host = SITE_URL.split("://", 1)[1].split("/", 1)[0]
+	return f"https://{site_host}{server_relative_url}".replace(" ", "%20")
+
+
 def build_html_link(server_relative_url, link_text):
 	"""結果ファイルのサーバー相対URLから、SharePointのリンク列と同じHTML形式（`<p><a href="...">...</a></p>`）の文字列を組み立てる。"""
-	site_host = SITE_URL.split("://", 1)[1].split("/", 1)[0]
-	absolute_url = f"https://{site_host}{server_relative_url}"
-	return f'<p><a href="{absolute_url}">{link_text}</a></p>'
+	return f'<p><a href="{build_absolute_url(server_relative_url)}">{link_text}</a></p>'
 
 
 class ConcurrentUpdateError(Exception):
