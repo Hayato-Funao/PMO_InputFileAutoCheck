@@ -230,6 +230,89 @@ def generate_fi_icm_case_folder_fixture(directory):
 	return {"input_root": input_root}
 
 
+# A2LのCAN ID記載を模したテキスト（実データ確認済みの2形式を含む）。
+# MEASUREMENT側は"CAN ID=100h"（空白あり、MAOと同じ表記）、CHARACTERISTIC側は
+# "CANID=300h"（空白なし表記。実データ`0F31AA49h受信切替SW`等で確認済み）。
+# XCP_ON_CAN・/begin CANブロックの"CAN_ID_MASTER 0x..."等は"="を使わない別表記のため、
+# CAN_ID_PATTERN（"="必須）では拾われないことの確認用に含める（2026-09追補）。
+A2L_FIXTURE_TEXT = (
+	"/begin MODULE TestModule \"\"\n"
+	"\t/begin MEASUREMENT\n"
+	"\t\tCANAA100TX_mp\n"
+	"\t\t\"CAN ID=100h Test Signal A\"\n"
+	"\t\tUBYTE NO_COMPU_METHOD 0 0 0 0\n"
+	"\t\tECU_ADDRESS 0x60000000\n"
+	"\t/end MEASUREMENT\n"
+	"\t/begin CHARACTERISTIC\n"
+	"\t\tF_SWRCV300h\n"
+	"\t\t\"CANID=300h Test Signal C\"\n"
+	"\t\tVALUE 0x60000010 NO_COMPU_METHOD 0 1 0 0\n"
+	"\t/end CHARACTERISTIC\n"
+	"\tXCP_ON_CAN\n"
+	"\t/begin PROTOCOL_LAYER\n"
+	"\t\tCAN_ID_MASTER 0x9ECDA010\n"
+	"\t\tCAN_ID_SLAVE 0x9ECDA810\n"
+	"\t/end PROTOCOL_LAYER\n"
+	"\t/begin CAN\n"
+	"\t\t/begin ADDRESS\n"
+	"\t\t\t0x98DAF110\n"
+	"\t\t/end ADDRESS\n"
+	"\t/end CAN\n"
+	"/end MODULE\n"
+)
+
+
+def generate_a2l_fixture(a2l_path, encoding="utf-8"):
+	"""
+	A2LのCAN ID記載を模したテキストを生成する（MAO代替取得のテスト用。2026-09追補）。
+
+	実データではUTF-8(CRLF)を確認済みだが、`extract_a2l_can_id_records`がcp932への
+	フォールバックも持つため、`encoding`引数でどちらでも生成できるようにしている。
+	"""
+	with open(a2l_path, "w", encoding=encoding, newline="\r\n") as a2l_file:
+		a2l_file.write(A2L_FIXTURE_TEXT)
+
+
+def generate_case_folder_fixture_with_a2l_fallback(directory):
+	"""
+	`case_scan.py`のMAO代替判定テスト用に、MAOがあるマスクとMAOが無くA2Lのみのマスクの
+	両方を含む案件フォルダを生成する（2026-09追補）。
+
+	構造:
+		01_INPUT/
+		    01_HEX関連/
+		        Mask1_HEX(A)/fixture.mao   … MAOがあるマスク（従来どおりMAOを採用）
+		        Mask2_HEX(B)/fixture.a2l   … MAOが無くA2Lのみのマスク（A2Lを代替採用）
+		    02_CAN関連/
+		        matrix_No1.xlsx
+
+	戻り値:
+		{"input_root": Path, "mask1_dir": Path, "mask2_dir": Path, "matrix_path": Path} の辞書
+	"""
+	directory = Path(directory)
+	input_root = directory / "01_INPUT"
+	hex_root = input_root / "01_HEX関連"
+	can_root = input_root / "02_CAN関連"
+
+	mask1_dir = hex_root / "Mask1_HEX(A)"
+	mask2_dir = hex_root / "Mask2_HEX(B)"
+	mask1_dir.mkdir(parents=True, exist_ok=True)
+	mask2_dir.mkdir(parents=True, exist_ok=True)
+	can_root.mkdir(parents=True, exist_ok=True)
+
+	generate_mao_fixture(mask1_dir / "fixture.mao")
+	generate_a2l_fixture(mask2_dir / "fixture.a2l")
+	matrix_path = can_root / "matrix_No1.xlsx"
+	generate_matrix_fixture(matrix_path)
+
+	return {
+		"input_root": input_root,
+		"mask1_dir": mask1_dir,
+		"mask2_dir": mask2_dir,
+		"matrix_path": matrix_path,
+	}
+
+
 def generate_multi_sheet_table_fixture(table_path):
 	"""
 	1ブックにTransmitter/Receiversヘッダを持つシートが複数あるCDCフォーマット類似のフィクスチャを

@@ -74,7 +74,7 @@ import result as check1_result  # noqa: E402  ①分。pure（SharePoint連携�
 from case_scan import scan_case_folder  # noqa: E402
 from can_info import extract_matrix_can_id_records  # noqa: E402
 from compare import compare_can_id_sources  # noqa: E402
-from mao_can_id import extract_mao_can_id_records  # noqa: E402
+from mao_can_id import extract_a2l_can_id_records, extract_mao_can_id_records  # noqa: E402
 from result import MaskCheckResult  # noqa: E402
 
 import check2_report  # noqa: E402  ②分。pure（SharePoint連携に依存しない）のため直接import
@@ -105,7 +105,7 @@ RUN_CHECK2 = True
 # 【動確時の確認事項】③がNGになった案件の内訳を必ず見ること。③はHEX/.epd/.a2lの
 # いずれかが未提出ならNGにする（fail-closed）ため、HEXを伴わない申請（CAN情報のみの
 # 変更等）が実在する場合は一律で赤になってしまう。その場合はスコープ判定の追加を検討する。
-RUN_CHECK3 = False
+RUN_CHECK3 = True
 
 # ②分の第2参照ファイル（SharePoint上にある特定の申請に紐付かない固定ファイル。②の
 # `input_check_main.SHAREPOINT_REFERENCE_FILE_PATH`と同じ役割）。
@@ -488,10 +488,19 @@ def _process_one_item(
 					can_id_column=scan_result.matrix_can_id_column,
 				)
 				for mask_entry in scan_result.mask_entries:
-					mao_records = extract_mao_can_id_records(mask_entry.mao_path)
+					# MAOが優先取得元。MAOが無いマスクのみA2Lで代替取得する（2026-09追補。
+					# case_scan.MaskEntry.source_kind参照）
+					if mask_entry.source_kind == "MAO":
+						mao_records = extract_mao_can_id_records(mask_entry.source_path)
+					else:
+						mao_records = extract_a2l_can_id_records(mask_entry.source_path)
 					comparison_rows = compare_can_id_sources(mao_records, matrix_records)
 					check_result = check1_result.build_check_result(comparison_rows)
-					mask_check_results.append(MaskCheckResult(mask_entry.label, check_result=check_result))
+					mask_check_results.append(
+						MaskCheckResult(
+							mask_entry.label, check_result=check_result, source_kind=mask_entry.source_kind
+						)
+					)
 
 			case_check_result = check1_result.build_case_result(mask_check_results, scan_result.structural_ng_messages)
 			check1_line = check1_result.build_result_summary(case_check_result)

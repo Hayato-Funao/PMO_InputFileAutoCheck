@@ -29,6 +29,15 @@
 	  行う（2026-08-31追補。枝番案件対応、後述）。SharePoint連携方針が未整合のため、現状は判別結果を
 	  コンソールへ表示する情報提供のみに用い、SharePointへの書き込みには使わない。
 
+2026-09追補（MAO代替取得。船尾さんの指示）:
+	- 案件フォルダにMAOが添付されない場合、同一マスクフォルダの`.a2l`ファイルからCAN ID情報を
+	  代替取得できるようにした（`mao_can_id.extract_a2l_can_id_records`）。**MAOが優先取得元**
+	  であり、MAOが1個あるマスクフォルダはA2Lの有無を問わずMAOを採用する。MAOが0個かつA2Lが
+	  1個の場合のみA2Lを採用する。A2Lが2個以上（MAOが0個の場合）は、どちらを使うべきか自動
+	  判別できないため、MAO重複と同様に構造的NGとする。本番想定データ45フォルダの実データ調査で
+	  「MAO欠落かつA2L有り」の実案件は確認できなかったため、この代替ロジックは今後そうした案件が
+	  発生した場合の備えという位置づけである。
+
 2026-08-31追補（本番想定36案件の実データ調査を踏まえた変更）:
 	- 1案件に複数の枝番（`_02`以降）が並存し、代表となる枝番のみが`01_INPUT`を持つ構成（従属する
 	  枝番は`02_委託見積`・`03_納品物`等はあるが`01_INPUT`・`01_HEX関連`・`02_CAN関連`が丸ごと無い）
@@ -55,6 +64,7 @@ CAN_FOLDER_NAME = "02_CAN関連"
 INPUT_FOLDER_NAME = "01_INPUT"
 
 MAO_SUFFIX = ".mao"
+A2L_SUFFIX = ".a2l"  # MAOが無い場合の代替取得元（2026-09追補）
 MATRIX_FILE_SUFFIXES = (".xlsm", ".xlsx", ".xls")
 MATRIX_NAME_MARKER = "matrix"  # ファイル名にこの文字列(大小無視)を含むものをCANマトリクスとして採用
 
@@ -66,11 +76,27 @@ CASE_ID_PATTERN = re.compile(r"^20\d{4}_\d{3}(?:_\d{2})?$")
 
 
 class MaskEntry:
-	"""1マスク分の情報（マスクフォルダとそこにあるMAOファイル）を保持するレコード。"""
+	"""
+	1マスク分の情報（マスクフォルダとそこにあるCAN ID取得元ファイル）を保持するレコード。
 
-	def __init__(self, label, mao_path):
+	【2026-09追補】MAOが優先取得元。MAOが見つからない場合のみA2Lを代替として使うため、
+	`mao_path`／`a2l_path`はどちらか一方のみが設定される（両方Noneにはならない）。
+	"""
+
+	def __init__(self, label, mao_path=None, a2l_path=None):
 		self.label = label  # 結果ファイルに表示するマスクの見出し（フォルダ名相当）
 		self.mao_path = mao_path
+		self.a2l_path = a2l_path  # MAOが無い場合の代替取得元（2026-09追補）
+
+	@property
+	def source_path(self):
+		"""CAN ID抽出に実際に使うファイルパス（MAO優先）。"""
+		return self.mao_path if self.mao_path is not None else self.a2l_path
+
+	@property
+	def source_kind(self):
+		"""CAN ID取得元の種別（"MAO"または"A2L"）。"""
+		return "MAO" if self.mao_path is not None else "A2L"
 
 
 class CaseScanResult:
@@ -160,6 +186,10 @@ def _find_mask_entries(hex_folders):
 	`01_HEX関連`配下（複数見つかった場合は全て）を再帰的に走査し、MAOファイルを直接含む
 	フォルダをマスクとして列挙する。1フォルダに複数のMAOがある場合は構造的NGとして記録する。
 
+	【2026-09追補】MAOが1つも無いフォルダでは、代替としてA2Lファイルを探す（MAO優先）。
+	A2Lが1個だけ見つかればそれをマスクとして採用し、2個以上あればMAO重複と同様に構造的NGと
+	する（モジュールdocstring「2026-09追補」参照）。
+
 	戻り値:
 		(MaskEntryのリスト（フォルダパス昇順）, 構造的NGメッセージのリスト)
 	"""
@@ -179,15 +209,30 @@ def _find_mask_entries(hex_folders):
 		mao_files = sorted(
 			p for p in folder.iterdir() if p.is_file() and p.suffix.lower() == MAO_SUFFIX
 		)
-		if len(mao_files) == 0:
-			continue
 		if len(mao_files) > 1:
 			names = "、".join(p.name for p in mao_files)
 			structural_ng_messages.append(
 				f"マスクフォルダ「{folder}」内に同種ファイル(MAO)が複数存在するため判定不能: {names}"
 			)
 			continue
-		mask_entries.append(MaskEntry(_mask_label(folder, owning_hex_folder), mao_files[0]))
+		if len(mao_files) == 1:
+			mask_entries.append(MaskEntry(_mask_label(folder, owning_hex_folder), mao_path=mao_files[0]))
+			continue
+
+		# MAOが0個の場合のみ、A2Lを代替取得元として探す（2026-09追補。MAO優先）
+		a2l_files = sorted(
+			p for p in folder.iterdir() if p.is_file() and p.suffix.lower() == A2L_SUFFIX
+		)
+		if len(a2l_files) == 0:
+			continue
+		if len(a2l_files) > 1:
+			names = "、".join(p.name for p in a2l_files)
+			structural_ng_messages.append(
+				f"マスクフォルダ「{folder}」内にMAOは無くA2Lが複数存在するため判定不能"
+				f"（MAO代替としてA2Lを採用しようとしたが特定できない）: {names}"
+			)
+			continue
+		mask_entries.append(MaskEntry(_mask_label(folder, owning_hex_folder), a2l_path=a2l_files[0]))
 
 	return mask_entries, structural_ng_messages
 

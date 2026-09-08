@@ -74,10 +74,13 @@ class CheckResult:
 class MaskCheckResult:
 	"""1マスクの結果（比較できた場合はCheckResult、比較できなかった場合はその理由）を保持する。"""
 
-	def __init__(self, mask_label, check_result=None, skipped_reason=None):
+	def __init__(self, mask_label, check_result=None, skipped_reason=None, source_kind=None):
 		self.mask_label = mask_label
 		self.check_result = check_result
 		self.skipped_reason = skipped_reason  # CANテーブルが特定できない等、比較を行えなかった理由
+		# CAN ID取得元（"MAO"または"A2L"）。2026-09追補。既存呼び出し（未指定）はNoneのままで
+		# format_case_result_messageの注記は表示しない
+		self.source_kind = source_kind
 
 
 class CaseCheckResult:
@@ -359,6 +362,10 @@ def format_case_result_message(case_check_result):
 		if mask_result.skipped_reason is not None:
 			lines.append(f"結果: 判定不可（{mask_result.skipped_reason}）")
 			continue
+		if mask_result.source_kind == "A2L":
+			# MAOが未添付のため、A2LファイルからCAN ID情報を代替取得したことを明記する
+			# （2026-09追補。MAOラベルが常に「(不明)」表示になるため取得元を注記で補う）
+			lines.append("（注記）MAOが添付されていないため、A2LファイルからCAN ID情報を代替取得して判定した。")
 		lines.append(format_result_message(mask_result.check_result))
 
 	return "\n".join(lines)

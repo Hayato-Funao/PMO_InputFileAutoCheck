@@ -43,8 +43,10 @@ from case_scan import (  # noqa: E402
 from compare import compare_can_id_sources  # noqa: E402
 from generate_fixtures import (  # noqa: E402
 	generate_3daa_cdc_style_matrix_fixture,
+	generate_a2l_fixture,
 	generate_ambiguous_multi_sheet_table_fixture,
 	generate_case_folder_fixture,
+	generate_case_folder_fixture_with_a2l_fallback,
 	generate_fi_icm_case_folder_fixture,
 	generate_fixtures,
 	generate_mao_fixture,
@@ -54,7 +56,7 @@ from generate_fixtures import (  # noqa: E402
 	generate_table_fixture,
 	zip_directory_contents,
 )
-from mao_can_id import extract_mao_can_id_records  # noqa: E402
+from mao_can_id import extract_a2l_can_id_records, extract_mao_can_id_records  # noqa: E402
 from result import (  # noqa: E402
 	MaskCheckResult,
 	build_case_result,
@@ -529,6 +531,126 @@ def test_select_can_table_sheet_returns_none_when_ambiguous():
 		shutil.rmtree(temporary_directory, ignore_errors=True)
 
 
+def test_extract_a2l_can_id_records_reads_can_id_but_not_protocol_ids():
+	"""
+	A2L代替取得の抽出ロジックを検証する（2026-09追補）。MEASUREMENT／CHARACTERISTIC説明文の
+	"CAN ID=100h"（空白あり）・"CANID=300h"（空白なし）はいずれも拾い、"/begin CAN"ブロックや
+	"XCP_ON_CAN"の"CAN_ID_MASTER 0x..."（"="を使わない別表記）は拾わないことを確認する。
+	"""
+	temporary_directory = Path(tempfile.mkdtemp(prefix="can_mao_check_test_"))
+	try:
+		a2l_path = temporary_directory / "fixture.a2l"
+		generate_a2l_fixture(a2l_path)
+
+		records = extract_a2l_can_id_records(a2l_path)
+		can_id_decimals = {record.can_id_decimal for record in records}
+
+		assert can_id_decimals == {256, 768}, (
+			f"MEASUREMENT/CHARACTERISTICのCAN ID=100h/300hのみ抽出されるはず"
+			f"（実際:{sorted(can_id_decimals)}）。CAN_ID_MASTER等の診断/計測通信IDが"
+			f"混入していないか確認すること"
+		)
+
+		print("test_extract_a2l_can_id_records_reads_can_id_but_not_protocol_ids: OK")
+	finally:
+		shutil.rmtree(temporary_directory, ignore_errors=True)
+
+
+def test_extract_a2l_can_id_records_supports_cp932_fallback():
+	"""A2LがUTF-8でデコードできない（cp932等）場合でも、フォールバックで抽出できることを確認する。"""
+	temporary_directory = Path(tempfile.mkdtemp(prefix="can_mao_check_test_"))
+	try:
+		a2l_path = temporary_directory / "fixture_cp932.a2l"
+		generate_a2l_fixture(a2l_path, encoding="cp932")
+
+		records = extract_a2l_can_id_records(a2l_path)
+		can_id_decimals = {record.can_id_decimal for record in records}
+
+		assert can_id_decimals == {256, 768}, (
+			f"cp932エンコーディングでも抽出できるはず（実際:{sorted(can_id_decimals)}）"
+		)
+
+		print("test_extract_a2l_can_id_records_supports_cp932_fallback: OK")
+	finally:
+		shutil.rmtree(temporary_directory, ignore_errors=True)
+
+
+def test_case_scan_uses_a2l_when_mao_missing():
+	"""
+	MAOが無くA2Lのみのマスクフォルダでは、A2Lを代替取得元として採用することを検証する
+	（2026-09追補。MAOがあるマスクは従来どおりMAOを採用する）。
+	"""
+	temporary_directory = Path(tempfile.mkdtemp(prefix="can_mao_check_test_"))
+	try:
+		fixture = generate_case_folder_fixture_with_a2l_fallback(temporary_directory)
+
+		scan_result = scan_case_folder(fixture["input_root"])
+		try:
+			assert len(scan_result.structural_ng_messages) == 0, (
+				f"構造的NGは無いはず（実際:{scan_result.structural_ng_messages}）"
+			)
+			entries_by_label = {entry.label: entry for entry in scan_result.mask_entries}
+			assert set(entries_by_label) == {"Mask1_HEX(A)", "Mask2_HEX(B)"}, (
+				f"MAOのマスク・A2Lのマスクの両方が検出されるはず（実際:{sorted(entries_by_label)}）"
+			)
+			assert entries_by_label["Mask1_HEX(A)"].source_kind == "MAO"
+			assert entries_by_label["Mask2_HEX(B)"].source_kind == "A2L", (
+				"MAOが無いマスクではA2Lが代替取得元になるはず"
+			)
+		finally:
+			if scan_result.work_directory is not None:
+				shutil.rmtree(scan_result.work_directory, ignore_errors=True)
+
+		print("test_case_scan_uses_a2l_when_mao_missing: OK")
+	finally:
+		shutil.rmtree(temporary_directory, ignore_errors=True)
+
+
+def test_case_scan_prefers_mao_when_both_present():
+	"""1マスクフォルダにMAOとA2Lの両方がある場合、MAOが優先され取得元になることを検証する。"""
+	temporary_directory = Path(tempfile.mkdtemp(prefix="can_mao_check_test_"))
+	try:
+		fixture = generate_case_folder_fixture(temporary_directory)
+		generate_a2l_fixture(fixture["mask1_dir"] / "fixture.a2l")
+
+		scan_result = scan_case_folder(fixture["input_root"])
+		try:
+			assert len(scan_result.mask_entries) == 1
+			assert scan_result.mask_entries[0].source_kind == "MAO", (
+				"MAOとA2Lが両方ある場合はMAOが優先されるはず"
+			)
+		finally:
+			if scan_result.work_directory is not None:
+				shutil.rmtree(scan_result.work_directory, ignore_errors=True)
+
+		print("test_case_scan_prefers_mao_when_both_present: OK")
+	finally:
+		shutil.rmtree(temporary_directory, ignore_errors=True)
+
+
+def test_case_scan_duplicate_a2l_is_structural_ng():
+	"""MAOが無くA2Lが複数存在する場合、A2L重複として構造的NGになることを検証する。"""
+	temporary_directory = Path(tempfile.mkdtemp(prefix="can_mao_check_test_"))
+	try:
+		fixture = generate_case_folder_fixture_with_a2l_fallback(temporary_directory)
+		generate_a2l_fixture(fixture["mask2_dir"] / "fixture2.a2l")
+
+		scan_result = scan_case_folder(fixture["input_root"])
+		try:
+			labels = {entry.label for entry in scan_result.mask_entries}
+			assert "Mask2_HEX(B)" not in labels, "A2L重複のマスクは判定対象から除外されるはず"
+			assert any("A2L" in message for message in scan_result.structural_ng_messages), (
+				f"A2L重複の構造的NGが記録されるはず（実際:{scan_result.structural_ng_messages}）"
+			)
+		finally:
+			if scan_result.work_directory is not None:
+				shutil.rmtree(scan_result.work_directory, ignore_errors=True)
+
+		print("test_case_scan_duplicate_a2l_is_structural_ng: OK")
+	finally:
+		shutil.rmtree(temporary_directory, ignore_errors=True)
+
+
 def test_case_scan_fi_icm_labels_do_not_collide():
 	"""
 	FI/ICM配下にそれぞれ同名のMask1_HEX(A)フォルダがある構成（202606_005_01・202608_006_01で
@@ -639,6 +761,11 @@ def run_test():
 	test_detect_columns_uses_header_names_and_handles_missing_id_format()
 	test_select_can_table_sheet_picks_unique_communication_sheet()
 	test_select_can_table_sheet_returns_none_when_ambiguous()
+	test_extract_a2l_can_id_records_reads_can_id_but_not_protocol_ids()
+	test_extract_a2l_can_id_records_supports_cp932_fallback()
+	test_case_scan_uses_a2l_when_mao_missing()
+	test_case_scan_prefers_mao_when_both_present()
+	test_case_scan_duplicate_a2l_is_structural_ng()
 	test_case_scan_fi_icm_labels_do_not_collide()
 	test_resolve_input_folder_path_from_input_itself()
 	test_resolve_input_folder_path_from_case_root()

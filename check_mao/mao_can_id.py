@@ -1,4 +1,4 @@
-"""MAOファイル(.mao)からCAN ID情報を抽出するモジュール。
+"""MAOファイル(.mao)またはA2Lファイル(.a2l、MAO代替時のみ)からCAN ID情報を抽出するモジュール。
 
 MAOはCCPラベル定義をShift-JIS(cp932)テキストで持つファイルで、各行が
 1つのCCPラベルレコードに対応する。CAN IDは「説明文」に相当する部分に
@@ -14,6 +14,16 @@ MAOはCCPラベル定義をShift-JIS(cp932)テキストで持つファイルで�
 	- 前置語混在: "IMA-CAN ID=338h" / "スターター制御用CAN ID=387h" / "1回目F-CAN ID=195h"
 	- 拡張ID(8桁): "CAN ID=0CD9AA4Dh"
 	- 配列ラベル: "CNTCAN1B8C[0]"のように末尾に添字が付き、同一CAN IDを複数行が参照する
+
+【2026-09追補】案件フォルダにMAOが添付されず`.a2l`のみが添付される場合の代替取得として
+`extract_a2l_can_id_records`を追加した。A2LのMEASUREMENT/CHARACTERISTIC等の説明文字列は
+MAOと全く同じ"CAN ID=074h"形式で車両CAN IDを記載している（本番想定データ45フォルダ全数の
+実測で確認：全件でMAO⊆A2L、すなわちMAOにあってA2Lに無いCAN IDは0件。一方20/45フォルダで
+A2L側にのみ存在する追加のCAN ID（NMフレーム受信・拡張ID受信切替SW等の正規の記載）があるが、
+これらも除外せずそのまま取得元として使う）。A2Lの`/begin CAN`〜`/end CAN`ブロックや
+`XCP_ON_CAN`（`CAN_ID_MASTER 0x9ECDA010`等）は計測/診断ツール通信IDであり車両CAN IDでは
+ないが、これらは"="を使わない別表記のため、"="必須の`CAN_ID_PATTERN`では抽出されない
+（誤ヒットの心配は無い）。
 """
 
 import re
@@ -79,6 +89,46 @@ def extract_mao_can_id_records(mao_file_path):
 			direction = detect_direction(label_name)
 
 			records.append(MaoCanIdRecord(line_number, label_name, can_id_hex_text, can_id_decimal, direction))
+
+	return records
+
+
+def extract_a2l_can_id_records(a2l_file_path):
+	"""
+	A2Lファイルを読み込み、CAN IDが記載された全行からレコードを抽出する（MAO代替用。2026-09追補）。
+
+	MAOが案件フォルダに添付されない場合の代替取得元として使う。A2LのMEASUREMENT／
+	CHARACTERISTIC等の説明文字列は、MAOと全く同じ"CAN ID=074h"形式で車両CAN IDを
+	記載しているため、既存の`CAN_ID_PATTERN`をそのまま流用できる（実データ調査で確認済み）。
+
+	引数:
+		a2l_file_path: 読み込むA2Lファイル(.a2l)のパス
+
+	戻り値:
+		MaoCanIdRecordのリスト（出現順）。A2Lはラベル名とCAN ID記載が別行（MEASUREMENT等の
+		マルチラインブロック構造）のため、label_name・directionはMAOのように行頭から
+		判別できず、常に空文字／Noneとする（突合には`can_id_decimal`のみ使うため影響しない）。
+	"""
+	records = []
+
+	# A2Lは実データでUTF-8(CRLF)を確認済みだが、生成システムにより異なる可能性があるため
+	# デコードに失敗した場合はcp932(MAOと同じエンコーディング)へフォールバックする
+	with open(a2l_file_path, "rb") as a2l_file:
+		raw_bytes = a2l_file.read()
+	try:
+		text = raw_bytes.decode("utf-8")
+	except UnicodeDecodeError:
+		text = raw_bytes.decode("cp932", errors="replace")
+
+	for line_number, line in enumerate(text.splitlines(), start=1):
+		matched = CAN_ID_PATTERN.search(line)
+		if matched is None:
+			continue
+
+		can_id_hex_text = matched.group(1)
+		can_id_decimal = normalize_can_id(can_id_hex_text)
+
+		records.append(MaoCanIdRecord(line_number, "", can_id_hex_text, can_id_decimal, None))
 
 	return records
 
