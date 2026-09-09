@@ -26,13 +26,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from can_info import (  # noqa: E402
-	_detect_columns,
 	extract_matrix_can_id_records,
+	find_matrix_header_location,
+	select_matrix_sheet,
+)
+from can_table_legacy import (  # noqa: E402
+	_detect_columns,
 	extract_table_can_id_records,
 	find_can_table_header_row,
-	find_matrix_header_location,
 	select_can_table_sheet,
-	select_matrix_sheet,
 )
 from case_scan import (  # noqa: E402
 	derive_case_id,
