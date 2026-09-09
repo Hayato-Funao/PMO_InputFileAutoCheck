@@ -145,14 +145,24 @@ MATRIX_CAN_ID_HEADER_TEXT = "CAN ID (HEX)"
 MATRIX_ID_HEADER_TEXT = "ID"
 
 
+# OOXML（Excel）が制御文字をシリアライズする際のエスケープ表記（例："_x000D_"=CR）。実データ
+# （3AC_002の`BusMatrix_...xlsx`）で、この表記が復号されず文字列としてそのまま残っている
+# ヘッダセル（"CAN ID_x000D_\n(HEX)"）を確認した（2026-09-03追補、HILS版で確認・本ファイルへ移植）。
+# 空白正規化の前に除去する。
+_EXCEL_CONTROL_CHAR_ESCAPE_PATTERN = re.compile(r"_x[0-9A-Fa-f]{4}_")
+
+
 def _normalize_header_text(text):
 	"""
 	見出し文字列の空白（改行・タブ・連続スペースを含む）を単一の半角スペースへ正規化し、
 	前後の空白を除去したうえで小文字化する。
 
 	実データでは、セル内改行を含む表記（"CAN ID\\n(HEX)"）が確認されており、これを
-	"CAN ID (HEX)"と同一視するために使う（`find_matrix_header_location`参照）。
+	"CAN ID (HEX)"と同一視するために使う（`find_matrix_header_location`参照）。2026-09-03追補：
+	OOXMLの制御文字エスケープ表記（"_x000D_"等）が復号されず文字列に残っているケースも確認され
+	たため、空白正規化の前にこれを除去する。
 	"""
+	text = _EXCEL_CONTROL_CHAR_ESCAPE_PATTERN.sub(" ", text)
 	return re.sub(r"\s+", " ", text.strip()).lower()
 
 # ヘッダが検出できない場合の後方互換フォールバック（旧仕様。A列固定・R1〜R3がヘッダ、R4がデータ開始）
@@ -284,11 +294,21 @@ def find_matrix_sheets(path):
 
 def looks_like_matrix(path):
 	"""
-	ファイルの内容（`CAN ID (HEX)`ヘッダを持つシートの有無）からCANマトリクスらしさを判定する
-	（CANテーブル側`looks_like_can_table`と同じ考え方。ファイル名の"Matrix"判定だけでは
+	ファイルの内容（`CAN ID (HEX)`ヘッダを持つシートがちょうど1つあるか）からCANマトリクスらしさを
+	判定する（CANテーブル側`looks_like_can_table`と同じ考え方。ファイル名の"Matrix"判定だけでは
 	別構造の補助ファイルを誤って対象に含めてしまう可能性があるため、内容ベースの判別を用いる）。
+
+	2026-09-03修正（HILS版で確認・本ファイルへ移植）：判定基準を「1件以上ヒット」から
+	「ちょうど1件ヒット」へ変更した。実データ（3AC_001の使用禁止decoyファイル
+	`Matrix_..._01.02.00 (1).xlsx`）で、1ファイル内に2シート（`Matrix`本体と、その列を絞り込んだ
+	派生シート`受信DUMMYのみ削除IDリスト`）が3DAA(CDC)フォールバック検出に一致し、
+	`select_matrix_sheet`は（自己矛盾のため）`None`を返すにもかかわらず、旧基準（`> 0`）では
+	「候補あり」と誤判定されていた。これにより`case_scan._find_matrix_path`のファイル単位の
+	候補選定で、本来1件しかない正しいCANマトリクスと合わせて候補2件に見え、「複数存在するため
+	判定不能」の誤ったNGになっていた。`select_matrix_sheet`と同じ「一意に特定できるか」を基準に
+	揃えることで、ファイル単体でも自己矛盾するdecoyファイルを候補から正しく除外する。
 	"""
-	return len(find_matrix_sheets(path)) > 0
+	return len(find_matrix_sheets(path)) == 1
 
 
 def select_matrix_sheet(path):
