@@ -74,7 +74,7 @@ from openpyxl.utils import get_column_letter
 # 版によって`元表`シートの内容が異なる（5.23=953行／5.22=951行）ため、版を間違えると[元表]の
 # OK/NG判定がそのまま変わる点に注意。
 #"C:\Users\RJ067219\OneDrive - Honda\デスクトップ\work\2026_タスク\08_タスク\Check_PythonCode\XPX定義ファイル管理_5.22_FI_ELEC.xlsm"
-SERVER_REFERENCE_FILE_PATH = r"\\snd89a0\proj-hils_pu3\proj-XPX\01_Eng\97_定義ファイル管理\01_管理\XPX\FI\XPX定義ファイル管理_5.23_FI_ELEC.xlsm" #本番にリンク
+SERVER_REFERENCE_FILE_PATH = r"\\snd89a0\proj-hils_pu3\proj-XPX\01_Eng\97_定義ファイル管理\01_管理\XPX\FI\XPX定義ファイル管理_5.24_FI_ELEC.xlsm" #本番にリンク
 #SERVER_REFERENCE_FILE_PATH = r"C:\Users\RJ067219\OneDrive - Honda\デスクトップ\work\2026_タスク\08_タスク\本番ツール\check_all\XPX定義ファイル管理_5.22_FI_ELEC.xlsm" #テスト用のリンク
 MOTOHYOU_SHEET_NAME = "元表"
 # The sheet on the second (SharePoint) fixed reference file that server/excel.xlsm's
