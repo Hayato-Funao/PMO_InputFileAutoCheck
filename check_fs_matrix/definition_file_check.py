@@ -54,6 +54,7 @@ not once per item.
 
 import os
 import re
+import glob
 
 import openpyxl
 from openpyxl.utils import get_column_letter
@@ -71,10 +72,72 @@ from openpyxl.utils import get_column_letter
 # 【注意】ファイル名にバージョン番号(5.23)が入っているため、定義ファイルの改版時はこのパスも
 # 更新が必要（SharePoint側リンクと同様、定期的な見直しが必要）。共有側の運用は「現行版を`FI\`
 # 直下に置き、旧版は`FI\old\`へ移す」形なので、改版時は`FI\`直下の最新ファイル名へ更新すること。
+# 本ツールではファイル名（5.24、5.25など）を固定で持たず、
+# FI直下に存在する現行版を自動検出して使用する。
 # 版によって`元表`シートの内容が異なる（5.23=953行／5.22=951行）ため、版を間違えると[元表]の
 # OK/NG判定がそのまま変わる点に注意。
+# 想定例:
+#
+# FI
+# ├─ XPX定義ファイル管理_5.25_FI_ELEC.xlsm
+# └─ old
+# ├─ XPX定義ファイル管理_5.24_FI_ELEC.xlsm
+# └─ XPX定義ファイル管理_5.23_FI_ELEC.xlsm
+#
+# 現行版が複数存在する場合は運用異常とみなしエラーとする。
+DEFINITION_FILE_DIRECTORY = (
+    r"\\snd89a0\proj-hils_pu3\proj-XPX"
+    r"\01_Eng\97_定義ファイル管理"
+    r"\01_管理\XPX\FI"
+)
+
+
+def resolve_definition_file_path():
+    """
+    FI直下に存在する XPX定義ファイル管理_*_FI_ELEC.xlsm を検索し、
+    現行版ファイルのフルパスを返す。
+    
+    戻り値:
+    現行版定義ファイルのフルパス
+    
+    例:
+    \\snd89a0\...\FI\
+    XPX定義ファイル管理_5.25_FI_ELEC.xlsm
+    
+    異常時:
+    ・0件 -> ファイル未配置
+    ・2件以上 -> 現行版が複数存在
+    """
+    
+    pattern = os.path.join(
+        DEFINITION_FILE_DIRECTORY,
+        "XPX定義ファイル管理_*_FI_ELEC.xlsm"
+    )
+    
+    files = glob.glob(pattern)
+    
+    if not files:
+        raise FileNotFoundError(
+            "XPX定義ファイル管理ファイルが見つかりません。"
+        )
+    
+    if len(files) > 1:
+        raise RuntimeError(
+            "XPX定義ファイル管理ファイルが複数存在します。"
+            f" 件数={len(files)}"
+        )
+    
+    return files[0]
+    
+# 現行版のXPX定義ファイル。
+#
+# 【注意】
+# ファイル名に含まれるバージョン番号（5.24等）は固定参照しない。
+# 改版時はFI直下のファイルを差し替えるだけでよく、
+# 本ソースの修正は不要。
+SERVER_REFERENCE_FILE_PATH = resolve_definition_file_path()
 #"C:\Users\RJ067219\OneDrive - Honda\デスクトップ\work\2026_タスク\08_タスク\Check_PythonCode\XPX定義ファイル管理_5.22_FI_ELEC.xlsm"
-SERVER_REFERENCE_FILE_PATH = r"\\snd89a0\proj-hils_pu3\proj-XPX\01_Eng\97_定義ファイル管理\01_管理\XPX\FI\XPX定義ファイル管理_5.24_FI_ELEC.xlsm" #本番にリンク
+#SERVER_REFERENCE_FILE_PATH = r"\\snd89a0\proj-hils_pu3\proj-XPX\01_Eng\97_定義ファイル管理\01_管理\XPX\FI\XPX定義ファイル管理_5.24_FI_ELEC.xlsm" #本番にリンク
 #SERVER_REFERENCE_FILE_PATH = r"C:\Users\RJ067219\OneDrive - Honda\デスクトップ\work\2026_タスク\08_タスク\本番ツール\check_all\XPX定義ファイル管理_5.22_FI_ELEC.xlsm" #テスト用のリンク
 MOTOHYOU_SHEET_NAME = "元表"
 # The sheet on the second (SharePoint) fixed reference file that server/excel.xlsm's
